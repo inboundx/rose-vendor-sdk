@@ -26,8 +26,8 @@ the Rose repository (`inboundx/inboundx`).
 Releasing is an outward action: do it only when asked.
 
 1. Bump `version` in `package.json` and `package-lock.json` (semver; stay on 0.x while the
-   contract changes), merge to `main`.
-2. Tag the merge commit `v<version>` and push the tag.
+   contract changes) on a branch, open a PR and squash-merge it: `main` accepts only PRs.
+2. Tag the squash commit on `main` (never a branch commit) `v<version>` and push the tag.
 3. In the Rose repository, set Ibanly's dependency (`backend/apps/r4a_ibanly/package.json`)
    to `github:inboundx/rose-vendor-sdk#v<version>`, run `just check` there, and open a PR.
    Update the install line in this README and in Rose's client guide to the new tag.
