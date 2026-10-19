@@ -18,7 +18,7 @@ the Rose repository (`inboundx/inboundx`).
   another request's promise can hang. See the key refresh in `src/signature.ts`.
 - **Keep the client guide in step.** The README's two TypeScript snippets are compiled by
   `scripts/smoke-package.mjs`. Rose's client guide (`docs/src/client/rose-for-agents/sdk-setup.md`)
-  must use the same snippets and archive version.
+  must use the same snippets and install tag.
 - **Check before finishing:** `npm ci`, `npm test`, `node scripts/smoke-package.mjs`.
 
 ## Release
@@ -30,7 +30,7 @@ Releasing is an outward action: do it only when asked.
 2. Tag the merge commit `v<version>` and push the tag.
 3. In the Rose repository, set Ibanly's dependency (`backend/apps/r4a_ibanly/package.json`)
    to `github:inboundx/rose-vendor-sdk#v<version>`, run `just check` there, and open a PR.
-   Vendors get the archive from `npm pack` of the tag.
+   Update the install line in this README and in Rose's client guide to the new tag.
 
 To try an unreleased change in Ibanly, install this checkout there with
 `npm install <path to this checkout>` and do not commit that change.

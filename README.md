@@ -6,15 +6,15 @@ and signed revocation events. Uses standard `Request`, `Response` and Web Crypto
 
 ## Install
 
-Use Node.js 22 or later with ESM, or a Web Crypto-capable server runtime. Obtain the
-versioned SDK archive from your Rose contact, then install it in your server project:
+Use Node.js 22 or later with ESM, or a Web Crypto-capable server runtime. Install a release
+tag in your server project; npm builds it on install:
 
 ```bash
-npm install ./userose-vendor-sdk-0.1.1.tgz
+npm install github:inboundx/rose-vendor-sdk#v0.1.2
 ```
 
-The archive includes compiled JavaScript, TypeScript declarations and an integration
-example. This release is distributed as an archive; it is not published to npm.
+The package includes compiled JavaScript, TypeScript declarations and an integration
+example. It is not published to the npm registry yet.
 
 ## Connect your product
 
@@ -127,3 +127,7 @@ The smoke script packs the SDK, installs it in a temporary consumer app, checks 
 declarations and exercises signed account operations and Handover over loopback HTTP.
 It removes its temporary app and closes its own server. To retain the archive, pass an
 absolute output directory as the first argument.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
