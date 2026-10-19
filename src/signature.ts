@@ -40,8 +40,9 @@ async function addKeys(into: Keys, jwks: unknown, only?: Environment): Promise<v
   }
 }
 
-async function published(refetch: boolean, now: number): Promise<Keys> {
-  if (cached && now - cached.at < (refetch ? REFETCH_AFTER_MS : TTL_MS)) return cached.keys;
+/** Rose's published keys, refreshed when the cache is older than `maxAgeMs`. */
+async function published(now: number, maxAgeMs: number): Promise<Keys> {
+  if (cached && now - cached.at < maxAgeMs) return cached.keys;
   if (now - refreshStartedAt < REFRESH_TIMEOUT_MS) {
     if (cached) return cached.keys;
     throw new VendorError(503, "Rose integration unavailable");
@@ -81,31 +82,37 @@ function base64(bytes: Uint8Array): string {
  * directories: for local development and tests only.
  */
 export async function verifyRequest(request: Request, bytes: Uint8Array, keys?: Jwks, now = Date.now()): Promise<Buyer> {
+  const invalid = () => new VendorError(401, "Invalid Rose signature");
   const input = inputPattern.exec(request.headers.get("Signature-Input") ?? "");
   const signature = signaturePattern.exec(request.headers.get("Signature") ?? "");
   const buyerId = request.headers.get("X-R4A-Buyer") ?? "";
   const url = new URL(request.url);
   // Queries are not covered by the Rose signing contract, so do not accept them.
-  if (!input || !signature || !buyerPattern.test(buyerId) || url.search) throw new VendorError(401, "Invalid Rose signature");
+  if (!input || !signature || !buyerPattern.test(buyerId) || url.search) throw invalid();
   const [, params = "", created = "0", expires = "0", kid = ""] = input;
   const seconds = now / 1000;
-  if (Math.abs(seconds - Number(created)) > 300 || Number(expires) < seconds || Number(expires) - Number(created) > 300) {
-    throw new VendorError(401, "Invalid Rose signature");
-  }
+  const fresh = Math.abs(seconds - Number(created)) <= 300 && Number(expires) >= seconds &&
+    Number(expires) - Number(created) <= 300;
+  if (!fresh) throw invalid();
+
   let directory: Keys;
   if (keys) {
     directory = new Map();
     await addKeys(directory, keys);
   } else {
-    directory = await published(false, now);
-    if (!directory.has(kid)) directory = await published(true, now);
+    directory = await published(now, TTL_MS);
+    if (!directory.has(kid)) directory = await published(now, REFETCH_AFTER_MS); // maybe a newly rotated key
   }
   const entry = directory.get(kid);
-  // No keys, or a key rotated in while another request is fetching: retryable, not a forgery.
-  const unavailable = !directory.size || (!keys && now - refreshStartedAt < REFRESH_TIMEOUT_MS);
-  if (!entry) throw new VendorError(unavailable ? 503 : 401, unavailable ? "Rose integration unavailable" : "Invalid Rose signature");
+  if (!entry) {
+    // No keys at all, or another request is still fetching the directories: retryable, not a forgery.
+    const retryable = !directory.size || (!keys && now - refreshStartedAt < REFRESH_TIMEOUT_MS);
+    if (retryable) throw new VendorError(503, "Rose integration unavailable");
+    throw invalid();
+  }
+
   const digest = `sha-256=:${base64(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>)))}:`;
-  if (request.headers.get("Content-Digest") !== digest) throw new VendorError(401, "Invalid Rose signature");
+  if (request.headers.get("Content-Digest") !== digest) throw invalid();
   const base = [
     `"@method": ${request.method.toUpperCase()}`,
     `"@authority": ${url.host}`,
@@ -116,7 +123,7 @@ export async function verifyRequest(request: Request, bytes: Uint8Array, keys?: 
   ].join("\n");
   const raw = Uint8Array.from(atob(signature[1] ?? ""), c => c.charCodeAt(0));
   if (!(await crypto.subtle.verify({ name: "Ed25519" }, entry.key, raw, encoder.encode(base)))) {
-    throw new VendorError(401, "Invalid Rose signature");
+    throw invalid();
   }
   return { buyerId, environment: entry.environment };
 }

@@ -69,12 +69,21 @@ export function text(value: unknown, name: string): string {
   return value;
 }
 
-export function origin(value: string): string {
+export const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** HTTPS (HTTP only on loopback, for development), without credentials, query or fragment. */
+export function trustedUrl(value: string): URL {
   const url = new URL(value);
-  const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-  if ((url.protocol !== "https:" && !(local && url.protocol === "http:")) ||
-      url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
-    throw new Error("Use an HTTPS origin (HTTP is allowed only for loopback development)");
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if ((url.protocol !== "https:" && !(loopback && url.protocol === "http:")) ||
+      url.username || url.password || url.search || url.hash) {
+    throw new Error("Use an HTTPS URL (HTTP is allowed only for loopback development)");
   }
+  return url;
+}
+
+export function origin(value: string): string {
+  const url = trustedUrl(value);
+  if (url.pathname !== "/") throw new Error("Use an HTTPS origin, without a path");
   return url.origin;
 }

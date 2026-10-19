@@ -78,6 +78,7 @@ test('rejects insecure configuration and private signing keys', () => {
   assert.throws(() => createHandoverVerifier({ ...config, issuer: 'http://identity.example' }));
   assert.throws(() => createHandoverVerifier({ ...config, allowedSources: [] }));
   assert.throws(() => createHandoverVerifier({ ...config, jwks: { keys: [{ ...publicKey, d: 'private' }] } }));
+  assert.throws(() => createHandoverVerifier({ ...config, jwks: { keys: [{ kty: 'oct', k: 'secret' }] } }));
 });
 
 test('captures trust configuration rather than following later caller mutation', async () => {

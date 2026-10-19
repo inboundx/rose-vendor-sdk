@@ -289,3 +289,54 @@ test('a failed key-directory fetch is logged, and the last keys keep verifying',
     ]);
   } finally { [globalThis.fetch, console.error] = [originalFetch, originalError]; }
 });
+
+test('serves each operation on exactly one method and path', async () => {
+  const { handler, calls } = setup();
+  const { account_id: id } = await (await handler(request('/r4a/accounts', { email: 'person@example.com' }))).json();
+  const routes = [['POST', '/r4a/trial'], ['POST', '/r4a/accounts'], ['GET', '/r4a/account'],
+    ['POST', `/r4a/accounts/${id}/checkout`], ['GET', `/r4a/accounts/${id}/access`], ['POST', `/r4a/accounts/${id}/use`]];
+  for (const [method, path] of routes) {
+    const wrong = method === 'GET' ? {} : undefined; // a body makes the request a POST
+    assert.equal((await handler(request(path, wrong))).status, 404, `${method === 'GET' ? 'POST' : 'GET'} ${path}`);
+  }
+  for (const path of ['/r4a', '/r4a/', '/r4a/accounts/', `/r4a/accounts/${id}/delete`, `/r4a/accounts/${'a'.repeat(129)}/use`, '/other/trial']) {
+    assert.equal((await handler(request(path, { input: {} }))).status, 404, path);
+  }
+  assert.equal(calls(), 1);
+});
+
+test('mounts at a custom base path and validates its configuration', async () => {
+  const { handler } = setup({ basePath: '/rose' });
+  assert.equal((await handler(request('/rose/trial', { input: {} }))).status, 200);
+  assert.equal((await handler(request('/r4a/trial', { input: {} }))).status, 404);
+  for (const basePath of ['', 'r4a', '/r4a/', '/r4a?x']) assert.throws(() => setup({ basePath }), /basePath/);
+  for (const maxBodyBytes of [0, 1.5, 1048577]) assert.throws(() => setup({ maxBodyBytes }), /maxBodyBytes/);
+});
+
+test('refuses a declared Content-Length over the limit before reading the body', async () => {
+  const { handler, calls } = setup({ maxBodyBytes: 10 });
+  assert.equal((await handler(request('/r4a/trial', { input: {} }, { headers: { 'Content-Length': '11' } }))).status, 413);
+  assert.equal(calls(), 0);
+});
+
+test('VendorError only accepts the contract statuses', () => {
+  assert.equal(new VendorError(402, { status: 'payment_required' }).status, 402);
+  for (const status of [200, 500, 418]) assert.throws(() => new VendorError(status, 'x'), /Unsupported/);
+});
+
+test('a key directory only speaks for its own environment', async () => {
+  const original = globalThis.fetch;
+  // The production directory also lists the test key: it must neither verify nor become production.
+  globalThis.fetch = async url => Response.json(String(url).includes('mcp-test')
+    ? { keys: [] } : { keys: [publicJwk('test-local'), publicJwk('production-1')] });
+  // Past every cache the tests above left in this process, so this call refreshes the directories.
+  const at = Date.now() + 10 * 3600_000;
+  const verifyAt = async environment => {
+    const req = request('/r4a/trial', { input: {} }, { environment, created: Math.floor(at / 1000) });
+    return verifyRequest(req, new Uint8Array(await req.clone().arrayBuffer()), undefined, at).catch(error => error);
+  };
+  try {
+    assert.equal((await verifyAt('production')).environment, 'production');
+    assert.equal((await verifyAt('test')).status, 401);
+  } finally { globalThis.fetch = original; }
+});
