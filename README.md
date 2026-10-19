@@ -10,7 +10,7 @@ Use Node.js 22 or later with ESM, or a Web Crypto-capable server runtime. Instal
 tag in your server project; npm builds it on install:
 
 ```bash
-npm install github:inboundx/rose-vendor-sdk#v0.1.2
+npm install github:inboundx/rose-vendor-sdk#v0.1.3
 ```
 
 The package includes compiled JavaScript, TypeScript declarations and an integration
