@@ -1,8 +1,73 @@
 # Rose vendor SDK
 
-Server-side TypeScript SDK for Rose for Agents. It routes Rose's signed-in vendor
-requests, authenticates buyers and environments, and verifies Handover identity proofs
-and signed revocation events. Uses standard `Request`, `Response` and Web Crypto APIs.
+This SDK lets a software company (a **vendor**) sell its product to AI assistants through
+Rose for Agents. You install it on your server; it handles the security and the HTTP side,
+and you plug in your own accounts, plans and product.
+
+## Context: Rose and Rose for Agents
+
+**Rose** ([userose.ai](https://userose.ai)) builds AI sales agents for B2B software
+companies. Its first product, Rose for Websites, puts an agent on a company's website that
+answers visitors' questions about the product, pricing and documentation.
+
+**Rose for Agents** sells to AI assistants instead of people. More and more buyers ask an
+assistant (Claude, ChatGPT, Cursor, Codex…) to do the work for them: "find me an API that
+validates IBANs, try it, and sign me up". Rose for Agents is a connector (an
+[MCP server](https://modelcontextprotocol.io)) that the buyer adds to their assistant
+once, and signs in to once with their Google account. Through it, the assistant can reach
+every company that works with Rose:
+
+1. **Evaluate:** ask the company's Rose agent questions, compare offers.
+2. **Try:** run the product on a real input, with no account yet.
+3. **Sign up:** create an account for the buyer.
+4. **Pay:** pick a plan; the buyer approves any payment.
+5. **Use:** get an API key, or use the product through Rose.
+
+Rose answers step 1 itself. Steps 2 to 5 need the vendor's own systems: only you can create
+an account at your company or issue your API keys. So Rose calls six HTTP endpoints that
+**you** host, under one base path (`/r4a` by default), and this SDK is how you host them:
+
+| Step | Rose calls | To |
+|---|---|---|
+| 2. Try | `POST /r4a/trial` | run the product on the assistant's input, with no account |
+| 3. Sign up | `GET /r4a/account` | find the buyer's existing account, if any (optional today) |
+| 3. Sign up | `POST /r4a/accounts` | create the buyer's account, or return the existing one |
+| 4. Pay | `POST /r4a/accounts/{id}/checkout` | choose a plan, and pay if it is not free |
+| 5. Use | `GET /r4a/accounts/{id}/access` | get the account's API key, plan and usage |
+| 5. Use | `POST /r4a/accounts/{id}/use` | run the product through the account |
+
+```text
+Buyer ──asks──▶ AI assistant ──MCP tools──▶ Rose for Agents ──signed HTTPS──▶ your server
+                (Claude, ChatGPT…)           (hosted by Rose)                  (this SDK +
+                                                                               your handlers)
+```
+
+The demo vendor, Ibanly ([ibanly.app](https://ibanly.app), a fake IBAN validation API),
+uses this contract end to end.
+
+## Words used in this README
+
+| Term | Meaning |
+|---|---|
+| **Vendor** | You: the company whose product is being bought. |
+| **Buyer** | The person the assistant works for, signed in to Rose. Identified by a UUID (`buyerId`); Rose has verified their email. |
+| **Environment** | `test` or `production`. Rose runs one connector of each (`mcp-test.userose.ai`, `mcp.userose.ai`). A test buyer must never reach a production account. |
+| **Signature** | Every call from Rose is signed with Rose's private key. The SDK checks it against Rose's public keys, so nobody else can call your endpoints as Rose. |
+| **Handover** | Claimable accounts: a person takes over a trial that an assistant started. **Not live yet**, see [Handover](#handover-claimable-accounts-coming). |
+
+## What the SDK does
+
+It has two independent parts:
+
+- **`createVendorHandler`** serves the six endpoints above. For each call it checks that
+  Rose signed it for your server, tells you which buyer and environment it is for, checks
+  the buyer owns the account, and only then calls your code (one handler per endpoint, see
+  [Connect your product](#connect-your-product)).
+- **`createHandoverVerifier`** verifies the signed tokens of Handover (claimable accounts).
+  Rose has not launched Handover yet: you do not need this part today.
+
+It runs on any server runtime with the standard `Request`, `Response` and Web Crypto APIs
+(for example Node.js 22+ or Cloudflare Workers).
 
 ## Install
 
@@ -15,6 +80,40 @@ npm install github:inboundx/rose-vendor-sdk#v0.1.3
 
 The package includes compiled JavaScript, TypeScript declarations and an integration
 example. It is not published to the npm registry yet.
+
+### Ask a coding agent to do it
+
+Paste this prompt into a coding agent (Claude Code, Codex, Cursor…) opened on your server's
+repository, and replace the bracketed parts:
+
+```text
+Connect this product to Rose for Agents with the Rose vendor SDK.
+
+1. Install it in the server project: npm install github:inboundx/rose-vendor-sdk#v0.1.3
+   Then read node_modules/@userose/vendor-sdk/README.md in full. It is the contract; follow
+   it over your own assumptions.
+2. Find how this server routes HTTP requests, how it stores accounts, and how it runs the
+   product operation an assistant should be able to call: [describe it, e.g. "convert an
+   IBAN into bank details"]. Tell me what you found before writing code.
+3. Mount createVendorHandler at /r4a/* with our public origin [https://api.example.com]
+   and basePath '/r4a'. Build the Request from the external URL, not from forwarded headers.
+4. Implement the handlers on our existing database and product code:
+   - account: provision idempotently, keyed on buyer.environment + buyer.buyerId. Never
+     match or merge an existing account by email.
+   - authorizeAccount: return true only when the stored owner and environment match the buyer.
+   - lookup: return the buyer's existing account or null.
+   - trial: a limited, free version of the product action.
+   - checkout, access, use: apply our plans, payments and quotas. Recheck ownership inside
+     the transaction that performs the operation, and make retries idempotent.
+   Throw VendorError for expected failures (402 for payment required, 409 for conflicts).
+   Store test and production accounts separately.
+5. Do not add a secret, an API key or an unsigned route for Rose: the SDK verifies Rose's
+   signatures against its published keys. Do not install the SDK in browser code.
+6. Add tests that sign requests with a local key passed through the `keys` option, covering
+   provisioning twice for the same buyer, a buyer reaching another buyer's account, and a
+   test buyer reaching a production account. Run our existing checks.
+7. Skip Handover and createHandoverVerifier: Rose has not launched claimable accounts yet.
+```
 
 ## Connect your product
 
@@ -32,26 +131,33 @@ Call `connectProduct('https://api.example.com', handlers)` and mount the returne
 URL when adapting from Node or a reverse proxy; do not trust arbitrary forwarded hosts.
 Never install this SDK in browser code.
 
-Your `handlers` implement these operations:
+Your `handlers` implement these operations. Paths are relative to the base path; any other
+method or path is a `404`.
 
-| Handler | Responsibility |
-|---|---|
-| `trial(buyer, input)` | Return `{output, note}` for a limited product action. |
-| `account(buyer, email)` | Return `{account_id, created}`. Provision idempotently using **environment + buyerId**, without merging by email. |
-| `lookup(buyer)` | For Handover, return `{account_id}` for an existing owned account or `null` when none exists; include accounts claimed from trials. |
-| `authorizeAccount(buyer, accountId)` | Check the stored owner and environment. Return false for unknown or inaccessible accounts. |
-| `checkout(buyer, accountId, offerId, paymentToken?)` | Apply your offer/payment rules and return the checkout result. |
-| `access(buyer, accountId)` | Return `{api_key, offer, usage}` for permitted access. |
-| `use(buyer, accountId, input)` | Enforce permissions/quotas and return `{output, usage}`. |
+| Route | Handler | Responsibility |
+|---|---|---|
+| `POST /trial` | `trial(buyer, input)` | Return `{output, note}` for a limited product action. |
+| `POST /accounts` | `account(buyer, email)` | Return `{account_id, created}`. Provision idempotently using **environment + buyerId**, without merging by email. |
+| `GET /account` | `lookup(buyer)` | For Handover, return `{account_id}` for an existing owned account or `null` when none exists; include accounts claimed from trials. |
+| | `authorizeAccount(buyer, accountId)` | Check the stored owner and environment. Return `true` only for the buyer's own account. |
+| `POST /accounts/{id}/checkout` | `checkout(buyer, accountId, offerId, paymentToken?)` | Apply your offer/payment rules and return the checkout result. |
+| `GET /accounts/{id}/access` | `access(buyer, accountId)` | Return `{api_key, offer, usage}` for permitted access. |
+| `POST /accounts/{id}/use` | `use(buyer, accountId, input)` | Enforce permissions/quotas and return `{output, usage}`. |
+
+Each call goes through the same steps: the origin, method and path must match, the body is
+read up to the size limit, Rose's signature is verified, the JSON body is parsed, and for
+`/accounts/{id}/*` and `GET /account` the SDK calls `authorizeAccount`. Only then does it
+call your handler.
 
 The SDK calls `authorizeAccount` before checkout, access and use. If ownership or access
 can change concurrently, recheck it inside the transaction that performs the product
 operation. Product operations, retries and payment idempotency remain your responsibility.
 
-Handover requires `GET /r4a/account`, supplied by `lookup`, so Rose reuses an existing
-account before starting another trial. The SDK authenticates the lookup and checks the
-returned account's ownership. If this optional handler is absent, lookup returns 503
-rather than treating an unsupported route as an absent account.
+`GET /r4a/account`, supplied by `lookup`, is optional today and will be required by
+[Handover](#handover-claimable-accounts-coming): Rose uses it to reuse an existing account
+before starting another trial. The SDK authenticates the lookup and checks the returned
+account's ownership. If this optional handler is absent, lookup returns 503 rather than
+treating an unsupported route as an absent account.
 
 Throw `new VendorError(409, 'No active plan')` for an intentional product failure. For
 payment-required results, use `new VendorError(402, {status: 'payment_required', amount_eur: 10})`.
@@ -70,10 +176,34 @@ Queries are refused because the signing contract does not cover them. Bodies def
 64 KiB, configurable with `maxBodyBytes` up to 1 MiB. Account identifiers must contain
 1–128 letters, digits, underscores or hyphens.
 
-## Handover
+## Handover: claimable accounts (coming)
 
-Rose provides the issuer, audience, client identifier, environment, accepted identity
-sources and **public** signing keys for your integration:
+> **Status: not live.** The tokens below are signed by Rose's identity service, which is not
+> hosted yet: Handover only runs on the demo vendor's local stack. Rose will tell you when it
+> opens and send your trust configuration then. Until then, skip this section, except for
+> **Prepare now** below.
+
+Today every account Rose creates at your product belongs to a buyer who already signed in to
+Rose. Handover adds **claimable accounts**: an assistant can start a trial before anyone has
+signed in, and a person claims it later, keeping the account and its usage. It is opt-in
+per vendor, and you host the endpoints that receive its tokens.
+
+1. An assistant starts a trial at your product. You store a **registration** for it and
+   show a six-digit **user code** and your claim page to the person.
+2. The person signs in through Rose, with one of the agreed **identity sources** (for
+   example `google`), and allows identity sharing.
+3. Your claim endpoint receives an **identity assertion** signed by Rose's identity
+   service: an ES256 JWT saying that buyer X, with verified email Y, claims registration Z with code C.
+   `verifyClaim` checks it; your database then gives the trial's account to that buyer.
+4. If the buyer later withdraws the delegation, Rose sends your events endpoint a signed
+   **revocation event**. `verifyRevocation` checks it; your database then cuts off every
+   credential issued for that buyer.
+
+The paths of the two endpoints are yours (the smoke test uses
+`/agent/identity/claim/complete` and `/agent/events`). Their keys are not the request-signing
+keys above: they are separate ES256 keys that you configure, not fetched by the SDK. Rose
+provides the issuer, audience, client identifier, environment, accepted identity sources
+and **public** signing keys for your integration:
 
 ```typescript
 import { createHandoverVerifier } from '@userose/vendor-sdk';
@@ -111,6 +241,18 @@ pages, credential issuance, resume/polling, expiry and provider-connection handl
 part of your product integration; this SDK provides the verification layer. Rose
 coordinates the full contract and rollout with your team. Rotate configured public keys
 by creating a new verifier with the updated trusted key set.
+
+### Prepare now
+
+Three choices in your signed routes make Handover a small addition later instead of a
+migration:
+
+- **Own accounts by environment + buyer, never by email.** A claim attaches an existing
+  account to a buyer; an email match must never do it.
+- **Implement `lookup`.** Handover needs it, and it already lets Rose reuse an account.
+- **Keep credentials separate from the account.** A claim replaces the trial's API key
+  while the account ID and usage stay, so a key must be replaceable without recreating
+  the account.
 
 ## Develop the SDK
 
