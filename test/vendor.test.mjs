@@ -266,3 +266,26 @@ test('concurrent requests start one fetch of the published key directories, with
     assert.equal(fetches, 2);
   } finally { globalThis.fetch = original; }
 });
+
+test('a failed key-directory fetch is logged, and the last keys keep verifying', async () => {
+  const [originalFetch, originalError] = [globalThis.fetch, console.error];
+  const errors = [];
+  console.error = (...args) => errors.push(args.join(' '));
+  const verifyAt = async at => {
+    const req = request('/r4a/trial', { input: {} }, { created: Math.floor(at / 1000) });
+    return verifyRequest(req, new Uint8Array(await req.clone().arrayBuffer()), undefined, at);
+  };
+  try {
+    // Past every cache TTL so each call refreshes: once with Rose up, then with Rose down.
+    const up = Date.now() + 3 * 3600_000, down = up + 2 * 3600_000;
+    globalThis.fetch = async url => Response.json(String(url).includes('mcp-test') ? { keys: [publicJwk('test-local')] } : { keys: [] });
+    assert.equal((await verifyAt(up)).environment, 'test');
+    assert.deepEqual(errors, []);
+    globalThis.fetch = async () => { throw new Error('network down'); };
+    assert.equal((await verifyAt(down)).environment, 'test');
+    assert.deepEqual(errors, [
+      'Rose key directory unavailable: https://mcp.userose.ai/.well-known/r4a-keys.json (network down)',
+      'Rose key directory unavailable: https://mcp-test.userose.ai/.well-known/r4a-keys.json (network down)',
+    ]);
+  } finally { [globalThis.fetch, console.error] = [originalFetch, originalError]; }
+});

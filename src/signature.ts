@@ -61,7 +61,9 @@ async function refresh(now: number): Promise<Keys> {
       const response = await fetch(url, { headers: { Accept: "application/json" } });
       if (!response.ok) throw new Error(String(response.status));
       await addKeys(keys, await response.json(), environment);
-    } catch {
+    } catch (error) {
+      // Logged, since callers only see a 503 or, with cached keys, nothing until a rotation fails.
+      console.error(`Rose key directory unavailable: ${url} (${error instanceof Error ? error.message : String(error)})`);
       // Keep the last keys of this environment rather than refusing every call during an outage.
       for (const [kid, entry] of cached?.keys ?? []) if (entry.environment === environment) keys.set(kid, entry);
     }
