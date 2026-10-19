@@ -1,0 +1,21 @@
+{
+  "name": "@userose/vendor-sdk",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Server-side SDK for connecting a vendor product to Rose for Agents.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": { "node": ">=22" },
+  "files": ["dist", "README.md", "examples"],
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+  },
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": { "jose": "6.2.12" },
+  "devDependencies": { "typescript": "5.9.3" }
+}
