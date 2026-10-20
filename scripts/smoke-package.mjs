@@ -41,6 +41,15 @@ declare const signedEvent: string;
 declare const trial: {id: string; userCode: string};
 declare const yourDatabase: {claimTrialAtomically(claim: VerifiedClaim): Promise<void>; revokeBuyerAtomically(event: VerifiedRevocation): Promise<void>};
 ${snippets.join('\n')}
+const provisioning: VendorHandlers['account'] = async (_buyer, _email, input) => ({
+  account_id: 'account_1', created: true,
+  next: typeof input?.company_name === 'string' ? input.company_name : 'Finish setup',
+});
+const legacyProvisioning: VendorHandlers['account'] = async (_buyer, _email) => ({
+  account_id: 'account_1', created: false,
+});
+void provisioning;
+void legacyProvisioning;
 `);
   execFileSync(process.execPath, [join(sdk, 'node_modules/typescript/bin/tsc'), '--noEmit', '--strict',
     '--module', 'NodeNext', '--target', 'ES2022', join(temp, 'consumer.ts')], { cwd: temp, stdio: 'pipe' });

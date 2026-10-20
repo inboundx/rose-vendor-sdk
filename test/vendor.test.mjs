@@ -120,6 +120,28 @@ test('routes the full signed-in funnel with idempotent creation and accumulated 
   assert.equal(access.headers.get('cache-control'), 'no-store');
 });
 
+test('passes provisioning input and returns only the public account fields, including next', async () => {
+  const received = [];
+  const { handler } = setup({ handlers: { account: async (...args) => {
+    received.push(args);
+    return { account_id: 'account_1', created: received.length === 1, next: 'Finish setup', secret: 'private' };
+  } } });
+  for (const input of [{ company_name: 'Example', website_url: 'https://example.com' }, undefined]) {
+    const response = await handler(request('/r4a/accounts', { email: 'person@example.com', input }));
+    assert.equal(response.status, received.length === 1 ? 201 : 200);
+    assert.deepEqual(received.at(-1), [{ buyerId, environment: 'test' }, 'person@example.com', input]);
+    assert.deepEqual(await response.json(), { account_id: 'account_1', next: 'Finish setup' });
+  }
+});
+
+test('rejects malformed provisioning input before calling product logic', async () => {
+  const { handler, calls } = setup();
+  for (const input of [null, [], '', 0, false]) {
+    assert.equal((await handler(request('/r4a/accounts', { email: 'person@example.com', input }))).status, 422);
+  }
+  assert.equal(calls(), 0);
+});
+
 test('accepts Rose checkout with an explicit null payment token', async () => {
   let payment;
   const { handler } = setup({ handlers: { checkout: async (_, _id, _offer, token) => {
@@ -196,13 +218,16 @@ test('fails closed without any Rose key and refuses a non-HTTPS origin', async (
   assert.throws(() => setup({ origin: 'http://vendor.example' }), /HTTPS/);
 });
 
-test('hides unexpected product exceptions while retaining intentional contract errors', async () => {
+test('hides unexpected product exceptions from Rose and logs them for the vendor', async t => {
+  const errors = t.mock.method(console, 'error', () => {});
+  const failure = new Error('secret-database-password');
   const handler = createVendorHandler({ origin, keys, handlers: {
-    async trial() { throw new Error('secret-database-password'); },
+    async trial() { throw failure; },
   } });
   const response = await handler(request('/r4a/trial', { input: {} }));
   assert.equal(response.status, 500);
   assert.equal((await response.text()).includes('secret-database-password'), false);
+  assert.deepEqual(errors.mock.calls.map(call => call.arguments), [['Rose vendor request failed', failure]]);
 });
 
 test('a truthy non-boolean authorization result does not grant access', async () => {
@@ -288,4 +313,55 @@ test('a failed key-directory fetch is logged, and the last keys keep verifying',
       'Rose key directory unavailable: https://mcp-test.userose.ai/.well-known/r4a-keys.json (network down)',
     ]);
   } finally { [globalThis.fetch, console.error] = [originalFetch, originalError]; }
+});
+
+test('serves each operation on exactly one method and path', async () => {
+  const { handler, calls } = setup();
+  const { account_id: id } = await (await handler(request('/r4a/accounts', { email: 'person@example.com' }))).json();
+  const routes = [['POST', '/r4a/trial'], ['POST', '/r4a/accounts'], ['GET', '/r4a/account'],
+    ['POST', `/r4a/accounts/${id}/checkout`], ['GET', `/r4a/accounts/${id}/access`], ['POST', `/r4a/accounts/${id}/use`]];
+  for (const [method, path] of routes) {
+    const wrong = method === 'GET' ? {} : undefined; // a body makes the request a POST
+    assert.equal((await handler(request(path, wrong))).status, 404, `${method === 'GET' ? 'POST' : 'GET'} ${path}`);
+  }
+  for (const path of ['/r4a', '/r4a/', '/r4a/accounts/', `/r4a/accounts/${id}/delete`, `/r4a/accounts/${'a'.repeat(129)}/use`, '/other/trial']) {
+    assert.equal((await handler(request(path, { input: {} }))).status, 404, path);
+  }
+  assert.equal(calls(), 1);
+});
+
+test('mounts at a custom base path and validates its configuration', async () => {
+  const { handler } = setup({ basePath: '/rose' });
+  assert.equal((await handler(request('/rose/trial', { input: {} }))).status, 200);
+  assert.equal((await handler(request('/r4a/trial', { input: {} }))).status, 404);
+  for (const basePath of ['', 'r4a', '/r4a/', '/r4a?x']) assert.throws(() => setup({ basePath }), /basePath/);
+  for (const maxBodyBytes of [0, 1.5, 1048577]) assert.throws(() => setup({ maxBodyBytes }), /maxBodyBytes/);
+});
+
+test('refuses a declared Content-Length over the limit before reading the body', async () => {
+  const { handler, calls } = setup({ maxBodyBytes: 10 });
+  assert.equal((await handler(request('/r4a/trial', { input: {} }, { headers: { 'Content-Length': '11' } }))).status, 413);
+  assert.equal(calls(), 0);
+});
+
+test('VendorError only accepts the contract statuses', () => {
+  assert.equal(new VendorError(402, { status: 'payment_required' }).status, 402);
+  for (const status of [200, 500, 418]) assert.throws(() => new VendorError(status, 'x'), /Unsupported/);
+});
+
+test('a key directory only speaks for its own environment', async () => {
+  const original = globalThis.fetch;
+  // The production directory also lists the test key: it must neither verify nor become production.
+  globalThis.fetch = async url => Response.json(String(url).includes('mcp-test')
+    ? { keys: [] } : { keys: [publicJwk('test-local'), publicJwk('production-1')] });
+  // Past every cache the tests above left in this process, so this call refreshes the directories.
+  const at = Date.now() + 10 * 3600_000;
+  const verifyAt = async environment => {
+    const req = request('/r4a/trial', { input: {} }, { environment, created: Math.floor(at / 1000) });
+    return verifyRequest(req, new Uint8Array(await req.clone().arrayBuffer()), undefined, at).catch(error => error);
+  };
+  try {
+    assert.equal((await verifyAt('production')).environment, 'production');
+    assert.equal((await verifyAt('test')).status, 401);
+  } finally { globalThis.fetch = original; }
 });
