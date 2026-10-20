@@ -137,7 +137,7 @@ method or path is a `404`.
 | Route | Handler | Responsibility |
 |---|---|---|
 | `POST /trial` | `trial(buyer, input)` | Return `{output, note}` for a limited product action. |
-| `POST /accounts` | `account(buyer, email)` | Return `{account_id, created}`. Provision idempotently using **environment + buyerId**, without merging by email. |
+| `POST /accounts` | `account(buyer, email, input?)` | Return `{account_id, created, next?}`. Provision idempotently using **environment + buyerId**, without merging by email. |
 | `GET /account` | `lookup(buyer)` | For Handover, return `{account_id}` for an existing owned account or `null` when none exists; include accounts claimed from trials. |
 | | `authorizeAccount(buyer, accountId)` | Check the stored owner and environment. Return `true` only for the buyer's own account. |
 | `POST /accounts/{id}/checkout` | `checkout(buyer, accountId, offerId, paymentToken?)` | Apply your offer/payment rules and return the checkout result. |
@@ -152,6 +152,11 @@ call your handler.
 The SDK calls `authorizeAccount` before checkout, access and use. If ownership or access
 can change concurrently, recheck it inside the transaction that performs the product
 operation. Product operations, retries and payment idempotency remain your responsibility.
+
+Account provisioning passes the optional `input` object from Rose to your handler for
+setup details such as a company name or website URL. Return an optional `next` string
+to give the buyer's assistant your next setup step. Existing two-argument account handlers
+continue to work.
 
 `GET /r4a/account`, supplied by `lookup`, is optional today and will be required by
 [Handover](#handover-claimable-accounts-coming): Rose uses it to reuse an existing account

@@ -3,7 +3,7 @@ import { type Jwks, verifyRequest } from "./signature.js";
 
 export interface VendorHandlers {
   trial(buyer: Buyer, input: { [key: string]: Json }): Promise<{ output: Json; note: string }>;
-  account(buyer: Buyer, email: string): Promise<{ account_id: string; created: boolean }>;
+  account(buyer: Buyer, email: string, input?: { [key: string]: Json }): Promise<{ account_id: string; created: boolean; next?: string }>;
   /** Required for Handover account reuse. Return null only when no owned account exists. */
   lookup?(buyer: Buyer): Promise<{ account_id: string } | null>;
   /** Check environment AND buyer against the stored owner. Called before all account operations. */
@@ -65,8 +65,10 @@ export function createVendorHandler(config: VendorConfig): (request: Request) =>
       case "account": {
         const email = text(data.email, "email");
         if (!EMAIL.test(email)) throw new VendorError(422, "Invalid email");
-        const result = await handlers.account(buyer, email);
-        return json({ account_id: result.account_id }, result.created ? 201 : 200);
+        const setup = data.input === undefined ? undefined : input(data.input);
+        const result = await handlers.account(buyer, email, setup);
+        return json({ account_id: result.account_id, ...(result.next === undefined ? {} : { next: result.next }) },
+          result.created ? 201 : 200);
       }
       case "lookup": {
         if (!handlers.lookup) throw new VendorError(503, "Account lookup is not configured");

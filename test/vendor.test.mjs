@@ -120,6 +120,28 @@ test('routes the full signed-in funnel with idempotent creation and accumulated 
   assert.equal(access.headers.get('cache-control'), 'no-store');
 });
 
+test('passes provisioning input and returns only the public account fields, including next', async () => {
+  const received = [];
+  const { handler } = setup({ handlers: { account: async (...args) => {
+    received.push(args);
+    return { account_id: 'account_1', created: received.length === 1, next: 'Finish setup', secret: 'private' };
+  } } });
+  for (const input of [{ company_name: 'Example', website_url: 'https://example.com' }, undefined]) {
+    const response = await handler(request('/r4a/accounts', { email: 'person@example.com', input }));
+    assert.equal(response.status, received.length === 1 ? 201 : 200);
+    assert.deepEqual(received.at(-1), [{ buyerId, environment: 'test' }, 'person@example.com', input]);
+    assert.deepEqual(await response.json(), { account_id: 'account_1', next: 'Finish setup' });
+  }
+});
+
+test('rejects malformed provisioning input before calling product logic', async () => {
+  const { handler, calls } = setup();
+  for (const input of [null, [], '', 0, false]) {
+    assert.equal((await handler(request('/r4a/accounts', { email: 'person@example.com', input }))).status, 422);
+  }
+  assert.equal(calls(), 0);
+});
+
 test('accepts Rose checkout with an explicit null payment token', async () => {
   let payment;
   const { handler } = setup({ handlers: { checkout: async (_, _id, _offer, token) => {
