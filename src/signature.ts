@@ -26,8 +26,9 @@ let cached: { keys: Keys; at: number } | null = null;
 // do not await another request's refresh: Cloudflare Workers can hang on a promise shared across
 // requests. They use the cached keys, or get a retryable 503 on a cold start. A refresh older than
 // REFRESH_TIMEOUT_MS counts as over, in case its request was cancelled before it finished.
-let refreshStartedAt = 0;
+let activeRefresh: { at: number } | null = null;
 const REFRESH_TIMEOUT_MS = 30_000;
+const DIRECTORY_TIMEOUT_MS = 10_000;
 
 async function addKeys(into: Keys, jwks: unknown, only?: Environment): Promise<void> {
   const list = (jwks as Partial<Jwks> | null)?.keys;
@@ -43,23 +44,29 @@ async function addKeys(into: Keys, jwks: unknown, only?: Environment): Promise<v
 /** Rose's published keys, refreshed when the cache is older than `maxAgeMs`. */
 async function published(now: number, maxAgeMs: number): Promise<Keys> {
   if (cached && now - cached.at < maxAgeMs) return cached.keys;
-  if (now - refreshStartedAt < REFRESH_TIMEOUT_MS) {
+  if (activeRefresh && now - activeRefresh.at < REFRESH_TIMEOUT_MS) {
     if (cached) return cached.keys;
     throw new VendorError(503, "Rose integration unavailable");
   }
-  refreshStartedAt = now;
+  const refresh = { at: now };
+  activeRefresh = refresh;
   try {
-    return await refresh(now);
+    const keys = await fetchKeys();
+    // A cancelled or slow request may outlive its lease. It must not roll back newer keys.
+    if (activeRefresh === refresh) cached = { keys, at: now };
+    return cached?.keys ?? keys;
   } finally {
-    refreshStartedAt = 0;
+    if (activeRefresh === refresh) activeRefresh = null;
   }
 }
 
-async function refresh(now: number): Promise<Keys> {
+async function fetchKeys(): Promise<Keys> {
   const keys: Keys = new Map();
   for (const [environment, url] of Object.entries(DIRECTORIES) as [Environment, string][]) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DIRECTORY_TIMEOUT_MS);
     try {
-      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      const response = await fetch(url, { headers: { Accept: "application/json" }, signal: controller.signal });
       if (!response.ok) throw new Error(String(response.status));
       await addKeys(keys, await response.json(), environment);
     } catch (error) {
@@ -67,9 +74,10 @@ async function refresh(now: number): Promise<Keys> {
       console.error(`Rose key directory unavailable: ${url} (${error instanceof Error ? error.message : String(error)})`);
       // Keep the last keys of this environment rather than refusing every call during an outage.
       for (const [kid, entry] of cached?.keys ?? []) if (entry.environment === environment) keys.set(kid, entry);
+    } finally {
+      clearTimeout(timeout);
     }
   }
-  cached = { keys, at: now };
   return keys;
 }
 
@@ -106,7 +114,7 @@ export async function verifyRequest(request: Request, bytes: Uint8Array, keys?: 
   const entry = directory.get(kid);
   if (!entry) {
     // No keys at all, or another request is still fetching the directories: retryable, not a forgery.
-    const retryable = !directory.size || (!keys && now - refreshStartedAt < REFRESH_TIMEOUT_MS);
+    const retryable = !directory.size || (!keys && activeRefresh && now - activeRefresh.at < REFRESH_TIMEOUT_MS);
     if (retryable) throw new VendorError(503, "Rose integration unavailable");
     throw invalid();
   }
