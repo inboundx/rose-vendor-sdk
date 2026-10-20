@@ -255,6 +255,43 @@ part of your product integration; this SDK provides the verification layer. Rose
 coordinates the full contract and rollout with your team. Rotate configured public keys
 by creating a new verifier with the updated trusted key set.
 
+### Agent access built in
+
+Instead of building that lifecycle yourself, let the SDK run it: `createAgentHandler` serves
+auth.md and its endpoints (`/auth.md`, `/.well-known/*`, `/agent/*`, `/oauth2/*`, `/claim`):
+anonymous trials with a limited key, the claim ceremony, token exchange, resume and both
+revocation paths. You supply two things:
+
+- **`accounts`** (`AgentAccounts`): create an account, issue and revoke a key with your own
+  API-key code (a trial key carries `expiresAt` and `maxUses`: enforce them), record the
+  person who claimed an account, and find the account a key belongs to.
+- **`store`** (`AgentStore`): read a record, and apply one change in one transaction over the
+  records `agentChangeKeys` names, with `applyAgentChange`. Every check of a claim or a
+  revocation happens inside that transaction, so concurrent claims cannot both win.
+
+```typescript
+import { agentChangeKeys, applyAgentChange, createAgentHandler, type AgentStore } from '@userose/vendor-sdk';
+
+const store: AgentStore = {
+  read: (key) => yourRecords.get(key),
+  apply: (change) => yourRecords.transaction(async (tx) => {
+    const records = Object.fromEntries(await Promise.all(
+      agentChangeKeys(change).map(async (key) => [key, await tx.getForUpdate(key)] as const)));
+    const { writes, outcome } = applyAgentChange(change, records, Date.now());
+    for (const [key, value] of Object.entries(writes)) await (value === null ? tx.delete(key) : tx.put(key, value));
+    return outcome;
+  }),
+};
+const agentAccess = createAgentHandler({ ...roseAgentConfiguration, accounts: yourAccounts, store });
+// Answer agent requests first; null means the request is not one of them.
+const answer = await agentAccess.handle(incomingRequest);
+```
+
+`agentAccess.contract` (or `createAccountDirectory(store, accounts)` without agent access)
+gives your signed `/r4a` handlers the same records: `lookup`, `provision`, `owns`, `check` and
+`access` (the key the buyer's agent uses), so an account claimed from a trial is the buyer's
+account through Rose too.
+
 ### Prepare now
 
 Three choices in your signed routes make Handover a small addition later instead of a
