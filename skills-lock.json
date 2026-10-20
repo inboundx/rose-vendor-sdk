@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "skills": {
+    "bento-adversarial-review": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-adversarial-review/SKILL.md",
+      "computedHash": "c21eeb756d7983ed501bed2c372431195af7b6b8ff0877eddfe2292ad8edc30d"
+    },
+    "bento-authoring-a-playbook": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-authoring-a-playbook/SKILL.md",
+      "computedHash": "46c437035d25303f2e03232da27e240bada06f3e4a4170706a68fd664c55eb2f"
+    },
+    "bento-checkpoint": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-checkpoint/SKILL.md",
+      "computedHash": "944ae6be6c6ead76284aaabc06aa98240460edfb37646225d76d8230047818c9"
+    },
+    "bento-cso": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-cso/SKILL.md",
+      "computedHash": "786d1b91b74b061957fe0731e9704c48ac93d755ca4a0a72d31df84cfa4313a1"
+    },
+    "bento-docs": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-docs/SKILL.md",
+      "computedHash": "d389ed7c203141f183d394532f6023fdbf693a226fd35a1601c9a2927492bd1d"
+    },
+    "bento-eval-blind": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-eval-blind/SKILL.md",
+      "computedHash": "353c9473c0b704410e4dfffbfa8a2a91fb445dddb913a8e08050dce7e0cd22d4"
+    },
+    "bento-figure-it-out": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-figure-it-out/SKILL.md",
+      "computedHash": "4fd8d7296c3bf7a86bb7a3a5d34c21bc978fc398533fb3b1f45e42e983a30a67"
+    },
+    "bento-hillclimb": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-hillclimb/SKILL.md",
+      "computedHash": "ece8a03463a88f70bb1d3fec9134b75036f40bd17cedfeb3c916075d045bfa75"
+    },
+    "bento-hotspots": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-hotspots/SKILL.md",
+      "computedHash": "98e1f6b24338e6ba321477913ffa77017cfaaafd723e1cdb1e12da61d964d101"
+    },
+    "bento-init": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-init/SKILL.md",
+      "computedHash": "ef063a960d6a75c5cfd23e29bbe8d670efd43a2b251252a347f3b7458a64fa17"
+    },
+    "bento-investigate": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-investigate/SKILL.md",
+      "computedHash": "85051e5a6b14e648ed4656516d942e31ba4006e827701d1523787ec6e42ef028"
+    },
+    "bento-learn": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-learn/SKILL.md",
+      "computedHash": "829e9a21ccba0d169319e110ed4e35568ee36f9dea712a8c10427886f3d6f4f1"
+    },
+    "bento-multi-phase-plan": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-multi-phase-plan/SKILL.md",
+      "computedHash": "f2da4c8ff009a29e2ab97f5c43abe73044726137801e1657d2fc7246fce70eef"
+    },
+    "bento-prototype": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-prototype/SKILL.md",
+      "computedHash": "1a90b8003e1c23c24ab4beb4832134c26efd70490b386f5c185f95081056efc5"
+    },
+    "bento-qa": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-qa/SKILL.md",
+      "computedHash": "bfe8ae8f9f2e2860c3de5da31bd48331a4ba7e256a1b35a261b4b143670b8bec"
+    },
+    "bento-refactor": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-refactor/SKILL.md",
+      "computedHash": "249130371fb63682283de476e567ccfbc8b83ac361ab44a451d169a5dbd5a117"
+    },
+    "bento-setup": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-setup/SKILL.md",
+      "computedHash": "a251cefc1cdf6ec41f4057fb47e8db5bf187d57fd83ec0bc78a420495d323151"
+    },
+    "bento-ship": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-ship/SKILL.md",
+      "computedHash": "bed39e1b68a7e6fb3252203e65eaf9daef1d3daf3815bbd6f3291a2e0e147e04"
+    },
+    "bento-spec": {
+      "source": "gnibu/bento",
+      "sourceType": "github",
+      "skillPath": "plugins/bento/skills/bento-spec/SKILL.md",
+      "computedHash": "cbe5d4a028a3524691a47b7c04c71c1b1bb9fa7cbf708e85cea3032b6427b897"
+    }
+  }
+}

@@ -18,6 +18,7 @@ export interface VerifiedClaim extends Buyer {
   identitySource: string;
   authenticatedAt: number;
   proofId: string;
+  issuedAt: number;
   expiresAt: number;
 }
 export interface VerifiedRevocation extends Buyer {
@@ -66,20 +67,28 @@ export function createHandoverVerifier(config: HandoverConfig) {
     return p as Token;
   }
 
+  /** A claim proof's checks, except its binding to a stored registration and code. */
+  async function claimProof(token: string): Promise<VerifiedClaim> {
+    const p = await verify(token, "oauth-id-jag+jwt");
+    const { email, identity_source: source, auth_time: authTime, registration_id: registrationId, user_code: userCode } = p;
+    const now = Math.floor(Date.now() / 1000);
+    const named = typeof registrationId === "string" && registrationId.length > 0 && registrationId.length <= 128 &&
+      typeof userCode === "string" && /^\d{6}$/.test(userCode);
+    const person = p.client_id === clientId && p.email_verified === true &&
+      typeof email === "string" && EMAIL.test(email) && typeof source === "string" && sources.has(source);
+    const recent = isSeconds(authTime) && authTime <= now + CLOCK_SKEW_S && now - authTime <= MAX_AUTH_AGE_S;
+    if (!named || !person || !recent) throw reject();
+    return { buyerId: p.sub, environment, registrationId, userCode, email, identitySource: source,
+      authenticatedAt: authTime, proofId: p.jti, issuedAt: p.iat, expiresAt: p.exp };
+  }
+
   return {
+    /** For agent access built on `createAgentHandler`, which compares the code with its stored hash. */
+    claimProof,
     async verifyClaim(token: string, expected: { registrationId: string; userCode: string }): Promise<VerifiedClaim> {
-      const p = await verify(token, "oauth-id-jag+jwt");
-      const { email, identity_source: source, auth_time: authTime } = p;
-      const now = Math.floor(Date.now() / 1000);
-      const forTrial = !!expected.registrationId && /^\d{6}$/.test(expected.userCode) &&
-        p.registration_id === expected.registrationId && p.user_code === expected.userCode;
-      const person = p.client_id === clientId && p.email_verified === true &&
-        typeof email === "string" && EMAIL.test(email) && typeof source === "string" && sources.has(source);
-      const recent = isSeconds(authTime) && authTime <= now + CLOCK_SKEW_S && now - authTime <= MAX_AUTH_AGE_S;
-      if (!forTrial || !person || !recent) throw reject();
-      return { buyerId: p.sub, environment, registrationId: expected.registrationId,
-        userCode: expected.userCode, email, identitySource: source,
-        authenticatedAt: authTime, proofId: p.jti, expiresAt: p.exp };
+      const claim = await claimProof(token);
+      if (!expected.registrationId || claim.registrationId !== expected.registrationId || claim.userCode !== expected.userCode) throw reject();
+      return claim;
     },
     async verifyRevocation(token: string): Promise<VerifiedRevocation> {
       const p = await verify(token, "secevent+jwt");

@@ -32,9 +32,16 @@ try {
   // The README's snippets; Rose's client guide (sdk-setup.md in the Rose repository) uses the same ones.
   const guide = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
   const snippets = [...guide.matchAll(/```typescript\n([\s\S]*?)\n```/g)].map(match => match[1]);
-  assert.equal(snippets.length, 2);
+  assert.equal(snippets.length, 3);
   writeFileSync(join(temp, 'consumer.ts'), `
-import { type HandoverConfig, type VerifiedClaim, type VerifiedRevocation } from '@userose/vendor-sdk';
+import { type AgentAccounts, type AgentConfig, type HandoverConfig, type Json, type VerifiedClaim, type VerifiedRevocation } from '@userose/vendor-sdk';
+declare const roseAgentConfiguration: Omit<AgentConfig, 'accounts' | 'store'>;
+declare const yourAccounts: AgentAccounts;
+declare const incomingRequest: Request;
+declare const yourRecords: {
+  get(key: string): Promise<Json | undefined>;
+  transaction<T>(work: (tx: { getForUpdate(key: string): Promise<Json | undefined>; put(key: string, value: Json): Promise<void>; delete(key: string): Promise<void> }) => Promise<T>): Promise<T>;
+};
 declare const roseTrustConfiguration: HandoverConfig;
 declare const identityAssertion: string;
 declare const signedEvent: string;
