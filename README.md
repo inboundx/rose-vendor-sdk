@@ -57,7 +57,7 @@ uses this contract end to end.
 
 ## What the SDK does
 
-It has two independent parts:
+It has three independent parts:
 
 - **`createVendorHandler`** serves the six endpoints above. For each call it checks that
   Rose signed it for your server, tells you which buyer and environment it is for, checks
@@ -65,6 +65,9 @@ It has two independent parts:
   [Connect your product](#connect-your-product)).
 - **`createHandoverVerifier`** verifies the signed tokens of Handover (claimable accounts).
   Rose has not launched Handover yet: you do not need this part today.
+- **`createAgentHandler`** runs Handover for you on top of that verifier: it serves auth.md
+  and its endpoints on your accounts and store (see
+  [Agent access built in](#agent-access-built-in)). Also not needed until Handover opens.
 
 It runs on any server runtime with the standard `Request`, `Response` and Web Crypto APIs
 (for example Node.js 22+ or Cloudflare Workers).
@@ -112,7 +115,8 @@ Connect this product to Rose for Agents with the Rose vendor SDK.
 6. Add tests that sign requests with a local key passed through the `keys` option, covering
    provisioning twice for the same buyer, a buyer reaching another buyer's account, and a
    test buyer reaching a production account. Run our existing checks.
-7. Skip Handover and createHandoverVerifier: Rose has not launched claimable accounts yet.
+7. Skip Handover, createHandoverVerifier and createAgentHandler: Rose has not launched
+   claimable accounts yet.
 ```
 
 ## Connect your product
@@ -260,7 +264,9 @@ by creating a new verifier with the updated trusted key set.
 Instead of building that lifecycle yourself, let the SDK run it: `createAgentHandler` serves
 auth.md and its endpoints (`/auth.md`, `/.well-known/*`, `/agent/*`, `/oauth2/*`, `/claim`):
 anonymous trials with a limited key, the claim ceremony, token exchange, resume and both
-revocation paths. You supply two things:
+revocation paths. Its configuration holds Rose's trust configuration (`rose`, `consent`,
+`environment`), your own ES256 signing key, how auth.md describes your product, and the calls
+a trial key allows (`trialLimit`); see `AgentConfig`. You supply two things:
 
 - **`accounts`** (`AgentAccounts`): create an account, issue and revoke a key with your own
   API-key code (a trial key carries `expiresAt` and `maxUses`: enforce them), record the
