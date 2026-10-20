@@ -103,6 +103,8 @@ export function createVendorHandler(config: VendorConfig): (request: Request) =>
       return await handle(request);
     } catch (error) {
       if (error instanceof VendorError) return json({ detail: error.detail }, error.status);
+      // Logged for you, never returned to Rose: the message may hold internal details.
+      console.error("Rose vendor request failed", error);
       return json({ detail: "Vendor service error" }, 500);
     }
   };

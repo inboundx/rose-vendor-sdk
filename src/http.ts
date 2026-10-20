@@ -1,6 +1,8 @@
 export type Environment = "test" | "production";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface Buyer { buyerId: string; environment: Environment }
+/** A buyer ID as Rose sends it: a lowercase UUID. The same buyer must match in every token. */
+export const BUYER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** An expected product error. Unexpected exceptions are never returned to callers. */
 export class VendorError extends Error {

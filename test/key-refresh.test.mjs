@@ -128,3 +128,31 @@ test('a superseded refresh cannot clear the marker of a pending refresh', async 
   newResponse.resolve(Response.json(jwks('production-new')));
   assert.equal((await newer).environment, 'production');
 });
+
+test('an unreadable directory on a cold start is retryable for its environment only', async t => {
+  const verify = await freshVerifier();
+  const at = Date.now();
+  t.mock.method(console, 'error', () => {});
+  const fetch = t.mock.method(globalThis, 'fetch', async url => {
+    if (String(url).includes('mcp-test')) return Response.json(jwks('test-local'));
+    throw new Error('network down');
+  });
+  // The production directory could not be read, so a production call gets a 503 Rose retries, not a 401.
+  await assert.rejects(verify(request('production-1', at), body, undefined, at), error => error.status === 503);
+  assert.equal((await verify(request('test-local', at), body, undefined, at)).environment, 'test');
+  // Once the directory answers, the next unknown-key refetch (a minute later) picks the key up.
+  fetch.mock.mockImplementation(async url => Response.json(String(url).includes('mcp-test') ? jwks('test-local') : jwks('production-1')));
+  const later = at + 60_000;
+  assert.equal((await verify(request('production-1', later), body, undefined, later)).environment, 'production');
+});
+
+test('a malformed key is skipped without discarding the rest of its directory', async t => {
+  const verify = await freshVerifier();
+  const at = Date.now();
+  const errors = t.mock.method(console, 'error', () => {});
+  t.mock.method(globalThis, 'fetch', async url => Response.json(String(url).includes('mcp-test')
+    ? { keys: [{ kty: 'OKP', crv: 'Ed25519', x: 'bad', kid: 'test-broken' }, ...jwks('test-local').keys] } : jwks()));
+  assert.equal((await verify(request('test-local', at), body, undefined, at)).environment, 'test');
+  assert.deepEqual(errors.mock.calls.map(call => call.arguments[0]),
+    ['Rose key ignored: test-broken is not a valid Ed25519 public key']);
+});

@@ -166,7 +166,12 @@ treating an unsupported route as an absent account.
 
 Throw `new VendorError(409, 'No active plan')` for an intentional product failure. For
 payment-required results, use `new VendorError(402, {status: 'payment_required', amount_eur: 10})`.
-Unexpected exceptions return a generic 500 without exposing their message.
+Unexpected exceptions return a generic 500 without exposing their message, and are logged
+with `console.error` so you can see them.
+
+Rose passes what `trial`, `access`, `use` and `checkout` return to the buyer's assistant as
+is, so you can add fields beyond the required ones (a documentation link, setup status…).
+Return only what the buyer may see: never a database row or internal identifiers.
 
 There is no secret to store. Rose signs each request with its own Ed25519 key (HTTP Message
 Signatures, RFC 9421) and the SDK checks it against Rose's published public keys, fetched
@@ -176,6 +181,9 @@ signature covers the exact raw body, **your** host (from `origin`), method, path
 so a request Rose signed for another vendor is refused here. The key that verifies names the
 environment, so a test call never acts on a production account. For local development and
 tests, pass `keys` (a JWKS) to trust a development key instead.
+If a key directory cannot be read (10-second timeout), the SDK keeps that environment's last
+keys and logs the failure; a call it cannot check yet gets a `503` ("Rose integration
+unavailable", worth retrying) rather than a `401`.
 The acceptance window is 300 seconds; product mutations must handle retries within it.
 Queries are refused because the signing contract does not cover them. Bodies default to
 64 KiB, configurable with `maxBodyBytes` up to 1 MiB. Account identifiers must contain

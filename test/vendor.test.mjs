@@ -218,13 +218,16 @@ test('fails closed without any Rose key and refuses a non-HTTPS origin', async (
   assert.throws(() => setup({ origin: 'http://vendor.example' }), /HTTPS/);
 });
 
-test('hides unexpected product exceptions while retaining intentional contract errors', async () => {
+test('hides unexpected product exceptions from Rose and logs them for the vendor', async t => {
+  const errors = t.mock.method(console, 'error', () => {});
+  const failure = new Error('secret-database-password');
   const handler = createVendorHandler({ origin, keys, handlers: {
-    async trial() { throw new Error('secret-database-password'); },
+    async trial() { throw failure; },
   } });
   const response = await handler(request('/r4a/trial', { input: {} }));
   assert.equal(response.status, 500);
   assert.equal((await response.text()).includes('secret-database-password'), false);
+  assert.deepEqual(errors.mock.calls.map(call => call.arguments), [['Rose vendor request failed', failure]]);
 });
 
 test('a truthy non-boolean authorization result does not grant access', async () => {

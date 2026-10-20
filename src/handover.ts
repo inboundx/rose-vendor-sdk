@@ -1,5 +1,5 @@
 import { createLocalJWKSet, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
-import { type Buyer, EMAIL, VendorError, origin, trustedUrl } from "./http.js";
+import { BUYER_ID, type Buyer, EMAIL, VendorError, origin, trustedUrl } from "./http.js";
 
 export const REVOKED_EVENT = "https://schemas.workos.com/events/agent/auth/identity/assertion/revoked";
 export interface HandoverConfig {
@@ -26,7 +26,6 @@ export interface VerifiedRevocation extends Buyer {
   expiresAt: number;
 }
 
-const BUYER = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_LIFETIME_S = 300; // a proof or event is valid for five minutes at most
 const CLOCK_SKEW_S = 30;
 const MAX_AUTH_AGE_S = 3600; // the person signed in within the last hour
@@ -59,7 +58,7 @@ export function createHandoverVerifier(config: HandoverConfig) {
     } catch { throw reject(); }
     const { sub, jti, iat, exp } = p;
     const now = Math.floor(Date.now() / 1000);
-    const ids = typeof sub === "string" && BUYER.test(sub) && typeof jti === "string" && jti.length > 0 && jti.length <= 128;
+    const ids = typeof sub === "string" && BUYER_ID.test(sub) && typeof jti === "string" && jti.length > 0 && jti.length <= 128;
     const times = isSeconds(iat) && isSeconds(exp) && exp > iat && exp - iat <= MAX_LIFETIME_S && iat <= now + CLOCK_SKEW_S;
     // jose accepts an audience array that contains ours; require exactly ours.
     const forUs = p.aud === audience && p.environment === environment;

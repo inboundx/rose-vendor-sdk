@@ -47,6 +47,7 @@ const invalid = [
   ['future issuance', now => ({ iat: now + 60 })],
   ['missing replay id', { jti: undefined }],
   ['invalid buyer', { sub: 'not-a-uuid' }],
+  ['uppercase buyer, which never matches signed calls', { sub: buyerId.toUpperCase() }],
   ['wrong registration', { registration_id: 'other' }],
   ['wrong code', { user_code: '654321' }],
 ];
@@ -55,6 +56,11 @@ for (const [name, overrides] of invalid) {
     await assert.rejects(verifier.verifyClaim(await proof(overrides), expected), VendorError);
   });
 }
+
+test('accepts any UUID version, as signed calls do', async () => {
+  const v7 = '01920f3a-7b2c-7d4e-8f10-2a3b4c5d6e7f';
+  assert.equal((await verifier.verifyClaim(await proof({ sub: v7 }), expected)).buyerId, v7);
+});
 
 test('rejects the wrong JWT type, forged signatures and a malformed expected code', async () => {
   await assert.rejects(verifier.verifyClaim(await proof({}, 'secevent+jwt'), expected), VendorError);

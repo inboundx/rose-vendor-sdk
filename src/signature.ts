@@ -1,4 +1,4 @@
-import { type Buyer, type Environment, VendorError } from "./http.js";
+import { BUYER_ID, type Buyer, type Environment, VendorError } from "./http.js";
 
 /**
  * Rose signs every vendor call with HTTP Message Signatures (RFC 9421) and the Ed25519 key of one
@@ -15,13 +15,14 @@ const DIRECTORIES: Record<Environment, string> = {
 const TTL_MS = 3600_000;
 const REFETCH_AFTER_MS = 60_000; // an unknown key id refetches at most once a minute
 const encoder = new TextEncoder();
-const buyerPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const inputPattern =
   /^r4a=(\("@method" "@authority" "@path" "content-digest" "x-r4a-buyer"\);created=(\d{1,12});expires=(\d{1,12});keyid="([A-Za-z0-9._-]{1,64})";alg="ed25519";tag="r4a-contract")$/;
 const signaturePattern = /^r4a=:([A-Za-z0-9+/]{86}==):$/;
 
 type Keys = Map<string, { environment: Environment; key: CryptoKey }>;
-let cached: { keys: Keys; at: number } | null = null;
+/** Verification keys, and the environments whose directory could not be read at the last refresh. */
+interface Directory { keys: Keys; failed: Set<Environment> }
+let cached: (Directory & { at: number }) | null = null;
 // One refresh at a time: unauthenticated callers must not fan out into directory fetches. Requests
 // do not await another request's refresh: Cloudflare Workers can hang on a promise shared across
 // requests. They use the cached keys, or get a retryable 503 on a cold start. A refresh older than
@@ -30,38 +31,49 @@ let activeRefresh: { at: number } | null = null;
 const REFRESH_TIMEOUT_MS = 30_000;
 const DIRECTORY_TIMEOUT_MS = 10_000;
 
+/** The environment a key ID names: `test-…` or `production-…`. */
+function environmentOf(kid: string): Environment | null {
+  return kid.startsWith("test-") ? "test" : kid.startsWith("production-") ? "production" : null;
+}
+
 async function addKeys(into: Keys, jwks: unknown, only?: Environment): Promise<void> {
   const list = (jwks as Partial<Jwks> | null)?.keys;
   for (const { kty, crv, x, kid } of Array.isArray(list) ? list : []) {
     if (kty !== "OKP" || crv !== "Ed25519" || typeof x !== "string" || typeof kid !== "string") continue;
-    const environment = kid.startsWith("test-") ? "test" : kid.startsWith("production-") ? "production" : null;
+    const environment = environmentOf(kid);
     // A directory only speaks for its own environment.
     if (!environment || (only && environment !== only)) continue;
-    into.set(kid, { environment, key: await crypto.subtle.importKey("jwk", { kty, crv, x }, { name: "Ed25519" }, false, ["verify"]) });
+    try {
+      into.set(kid, { environment, key: await crypto.subtle.importKey("jwk", { kty, crv, x }, { name: "Ed25519" }, false, ["verify"]) });
+    } catch {
+      // One malformed key must not discard the others, such as a key being rotated in.
+      console.error(`Rose key ignored: ${kid} is not a valid Ed25519 public key`);
+    }
   }
 }
 
 /** Rose's published keys, refreshed when the cache is older than `maxAgeMs`. */
-async function published(now: number, maxAgeMs: number): Promise<Keys> {
-  if (cached && now - cached.at < maxAgeMs) return cached.keys;
+async function published(now: number, maxAgeMs: number): Promise<Directory> {
+  if (cached && now - cached.at < maxAgeMs) return cached;
   if (activeRefresh && now - activeRefresh.at < REFRESH_TIMEOUT_MS) {
-    if (cached) return cached.keys;
+    if (cached) return cached;
     throw new VendorError(503, "Rose integration unavailable");
   }
   const refresh = { at: now };
   activeRefresh = refresh;
   try {
-    const keys = await fetchKeys();
+    const directory = await fetchKeys();
     // A cancelled or slow request may outlive its lease. It must not roll back newer keys.
-    if (activeRefresh === refresh) cached = { keys, at: now };
-    return cached?.keys ?? keys;
+    if (activeRefresh === refresh) cached = { ...directory, at: now };
+    return cached ?? directory;
   } finally {
     if (activeRefresh === refresh) activeRefresh = null;
   }
 }
 
-async function fetchKeys(): Promise<Keys> {
+async function fetchKeys(): Promise<Directory> {
   const keys: Keys = new Map();
+  const failed = new Set<Environment>();
   for (const [environment, url] of Object.entries(DIRECTORIES) as [Environment, string][]) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), DIRECTORY_TIMEOUT_MS);
@@ -72,13 +84,14 @@ async function fetchKeys(): Promise<Keys> {
     } catch (error) {
       // Logged, since callers only see a 503 or, with cached keys, nothing until a rotation fails.
       console.error(`Rose key directory unavailable: ${url} (${error instanceof Error ? error.message : String(error)})`);
+      failed.add(environment);
       // Keep the last keys of this environment rather than refusing every call during an outage.
       for (const [kid, entry] of cached?.keys ?? []) if (entry.environment === environment) keys.set(kid, entry);
     } finally {
       clearTimeout(timeout);
     }
   }
-  return keys;
+  return { keys, failed };
 }
 
 function base64(bytes: Uint8Array): string {
@@ -96,25 +109,28 @@ export async function verifyRequest(request: Request, bytes: Uint8Array, keys?: 
   const buyerId = request.headers.get("X-R4A-Buyer") ?? "";
   const url = new URL(request.url);
   // Queries are not covered by the Rose signing contract, so do not accept them.
-  if (!input || !signature || !buyerPattern.test(buyerId) || url.search) throw invalid();
+  if (!input || !signature || !BUYER_ID.test(buyerId) || url.search) throw invalid();
   const [, params = "", created = "0", expires = "0", kid = ""] = input;
   const seconds = now / 1000;
   const fresh = Math.abs(seconds - Number(created)) <= 300 && Number(expires) >= seconds &&
     Number(expires) - Number(created) <= 300;
   if (!fresh) throw invalid();
 
-  let directory: Keys;
+  let directory: Directory;
   if (keys) {
-    directory = new Map();
-    await addKeys(directory, keys);
+    directory = { keys: new Map(), failed: new Set() };
+    await addKeys(directory.keys, keys);
   } else {
     directory = await published(now, TTL_MS);
-    if (!directory.has(kid)) directory = await published(now, REFETCH_AFTER_MS); // maybe a newly rotated key
+    if (!directory.keys.has(kid)) directory = await published(now, REFETCH_AFTER_MS); // maybe a newly rotated key
   }
-  const entry = directory.get(kid);
+  const entry = directory.keys.get(kid);
   if (!entry) {
-    // No keys at all, or another request is still fetching the directories: retryable, not a forgery.
-    const retryable = !directory.size || (!keys && activeRefresh && now - activeRefresh.at < REFRESH_TIMEOUT_MS);
+    // Retryable, not a forgery: no keys at all, the kid's directory could not be read, or
+    // another request is still fetching the directories.
+    const environment = environmentOf(kid);
+    const retryable = !directory.keys.size || (environment !== null && directory.failed.has(environment)) ||
+      (!keys && activeRefresh !== null && now - activeRefresh.at < REFRESH_TIMEOUT_MS);
     if (retryable) throw new VendorError(503, "Rose integration unavailable");
     throw invalid();
   }
