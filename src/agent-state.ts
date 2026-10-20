@@ -40,6 +40,7 @@ export interface AccountRecord {
   agent?: AgentState;
   key?: AgentKey;
   staleKeys?: string[]; // keys to revoke at your product
+  claimedBy?: string; // email of the claim to record at your product; no key until then
 }
 
 /** `buyer:<environment>:<buyer id>`: the buyer's one account, used proofs and revocation cutoff. */
@@ -61,7 +62,8 @@ export type AgentChange =
   | { type: "revoke_owner"; owner: string; account: string | null; eventId: string; eventExpires: number; issuedAt: number }
   | { type: "revocation_done"; owner: string; eventId: string; eventExpires: number }
   | { type: "provision"; owner: string; account: string }
-  | { type: "set_key"; account: string; key: AgentKey }
+  | { type: "set_key"; account: string; key: AgentKey; scope: "trial" | "full" }
+  | { type: "claim_recorded"; account: string; email: string }
   | { type: "key_revoked"; account: string; keyId: string };
 
 /** `ok` with details, or `error` with an auth.md error code. */
@@ -88,7 +90,7 @@ export function agentChangeKeys(change: AgentChange): string[] {
 
 /** The grant an account's agent key should carry now, or null when it may hold none. */
 export function keyGrant(record: AccountRecord | undefined, now: number): { scope: "trial" | "full"; expiresAt?: number; maxUses?: number } | null {
-  if (!record?.owner && !record?.agent) return null;
+  if ((!record?.owner && !record?.agent) || record.claimedBy) return null;
   const agent = record.agent;
   if (!agent) return { scope: "full" };
   if (agent.status === "claimed") return agent.credentialExpires > now ? { scope: "full", expiresAt: agent.credentialExpires } : null;
@@ -174,6 +176,7 @@ export function applyAgentChange(change: AgentChange, records: Record<string, Js
       if (agent.loginHint && agent.loginHint.toLowerCase() !== change.email.toLowerCase()) return fail("wrong_account");
 
       record.owner = change.owner;
+      record.claimedBy = change.email;
       buyer.account = change.account;
       retireKey(record); // the trial's key stops working
       Object.assign(agent, {
@@ -257,10 +260,19 @@ export function applyAgentChange(change: AgentChange, records: Record<string, Js
     case "set_key": {
       const record = load<AccountRecord>(accountKey(change.account));
       if (record?.key) return done({ key: record.key as unknown as Json, kept: true });
-      if (!record || !keyGrant(record, now)) return fail("restricted");
+      // A key issued for the trial must not become the claimed account's key, nor the reverse.
+      if (!record || keyGrant(record, now)?.scope !== change.scope) return fail("restricted");
       record.key = change.key;
       save(accountKey(change.account), record);
       return done({ key: change.key as unknown as Json, kept: false });
+    }
+
+    case "claim_recorded": {
+      const record = load<AccountRecord>(accountKey(change.account));
+      if (record?.claimedBy !== change.email) return done();
+      delete record.claimedBy;
+      save(accountKey(change.account), record);
+      return done();
     }
 
     case "key_revoked": {

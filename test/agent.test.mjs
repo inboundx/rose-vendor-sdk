@@ -30,9 +30,11 @@ function product() {
   let n = 0;
   const keys = new Map(), emails = new Map();
   return {
-    keys, emails, failRevoke: false,
+    keys, emails, failRevoke: false, failIssue: false, failClaimed: false, beforeIssue: null,
     async create() { return `acct_${++n}`; },
     async issueKey(account, grant) {
+      if (this.failIssue) throw new Error('product unavailable');
+      await this.beforeIssue?.();
       const id = `key_${++n}`, apiKey = `sk_${account}_${crypto.randomUUID()}`;
       keys.set(apiKey, { account, id, grant, uses: 0 });
       return { id, apiKey };
@@ -41,7 +43,10 @@ function product() {
       if (this.failRevoke) throw new Error('product unavailable');
       for (const [apiKey, key] of keys) if (key.account === account && key.id === id) keys.delete(apiKey);
     },
-    async claimed(account, person) { emails.set(account, person.email); },
+    async claimed(account, person) {
+      if (this.failClaimed) throw new Error('product unavailable');
+      emails.set(account, person.email);
+    },
     accountOfKey(apiKey) { return keys.get(apiKey)?.account ?? null; },
     /** What the vendor's API answers to a call with this key. */
     call(apiKey) {
@@ -235,4 +240,61 @@ test('discovery, consent redirect, operator view and the browser origin', async 
   assert.equal((await v.post('/agent/identity/claim/complete', '{}', { Origin: 'https://evil.example' })).status, 403);
   assert.equal(await v.agent.handle(new Request(`${ORIGIN}/api/other`)), null);
   assert.equal((await v.agent.handle(new Request('https://elsewhere.example/auth.md'))).status, 404);
+});
+
+test('a claim during a trial exchange never hands the trial a full key', async () => {
+  const v = await setup();
+  const r = await register(v), buyer = buyerId();
+  let claimed;
+  v.accounts.beforeIssue = async () => { v.accounts.beforeIssue = null; claimed = await json(await complete(v, r, buyer)); };
+  assert.deepEqual(await json(await exchange(v, r.identity_assertion)), { error: 'invalid_grant' });
+  assert.equal(v.accounts.keys.size, 0); // the trial key issued meanwhile is revoked
+  const full = await json(await exchange(v, claimed.identity_assertion));
+  assert.equal(full.scope, 'thing:use');
+  assert.equal(v.accounts.keys.get(full.access_token).grant.scope, 'full');
+});
+
+test('no key until the product records the claim; the next request retries it', async () => {
+  const v = await setup();
+  const r = await register(v), buyer = buyerId();
+  v.accounts.failClaimed = true;
+  const claimed = await json(await complete(v, r, buyer));
+  assert.equal(claimed.status, 'claimed');
+  assert.deepEqual(await json(await exchange(v, claimed.identity_assertion)), { error: 'temporarily_unavailable' });
+  await assert.rejects(v.agent.contract.access({ buyerId: buyer, environment: 'test' }, r.registration_id));
+  v.accounts.failClaimed = false;
+  const full = await json(await exchange(v, claimed.identity_assertion)); // the assertion was not spent
+  assert.equal(v.accounts.emails.get(r.registration_id), 'person@example.com');
+  assert.equal(v.accounts.call(full.access_token), 200);
+});
+
+test('a failed key issuance leaves the trial assertion usable', async () => {
+  const v = await setup();
+  const r = await register(v);
+  v.accounts.failIssue = true;
+  const failed = await exchange(v, r.identity_assertion);
+  assert.equal(failed.status, 503);
+  v.accounts.failIssue = false;
+  assert.equal((await json(await exchange(v, r.identity_assertion))).scope, 'thing:trial');
+});
+
+test('revocation answers 503 while the key still works, and the retry revokes it', async () => {
+  const v = await setup();
+  const r = await register(v);
+  const key = (await json(await exchange(v, r.identity_assertion))).access_token;
+  v.accounts.failRevoke = true;
+  assert.equal((await v.post('/oauth2/revoke', { token: key })).status, 503);
+  assert.equal(v.accounts.call(key), 200);
+  v.accounts.failRevoke = false;
+  assert.equal((await v.post('/oauth2/revoke', { token: key })).status, 200);
+  assert.equal(v.accounts.call(key), 401);
+});
+
+test('a streamed body over the limit is refused without reading it all', async () => {
+  const v = await setup();
+  let pulled = 0;
+  const body = new ReadableStream({ pull(controller) { pulled++; controller.enqueue(new Uint8Array(4096)); } });
+  const response = await v.agent.handle(new Request(`${ORIGIN}/agent/identity`, { method: 'POST', body, duplex: 'half' }));
+  assert.deepEqual(await json(response), { error: 'invalid_request' });
+  assert.ok(pulled < 10, `pulled ${pulled} chunks`);
 });

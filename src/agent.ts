@@ -6,7 +6,7 @@
  */
 import { createLocalJWKSet, importPKCS8, jwtVerify, SignJWT, type JSONWebKeySet } from "jose";
 import { createHandoverVerifier, REVOKED_EVENT } from "./handover.js";
-import { type Buyer, EMAIL, type Environment, type Json, origin as httpsOrigin, trustedUrl } from "./http.js";
+import { type Buyer, EMAIL, type Environment, type Json, origin as httpsOrigin, readBytes, trustedUrl } from "./http.js";
 import { type AccountRecord, accountKey, type AgentChange, type AgentKey, type AgentOutcome, type AgentState,
   type BuyerRecord, buyerKey, CLAIM_SECONDS, keyGrant } from "./agent-state.js";
 import { agentSkill } from "./agent-skill.js";
@@ -33,7 +33,7 @@ export interface AgentAccounts {
   issueKey(accountId: string, grant: { scope: "trial" | "full"; expiresAt?: number; maxUses?: number }): Promise<AgentKey>;
   /** Stop a key at once. Revoking an unknown key is not an error. */
   revokeKey(accountId: string, keyId: string): Promise<void>;
-  /** A person with this verified email now owns the account: record it, leave the trial plan. */
+  /** A person with this verified email now owns the account: record it, leave the trial plan. Retried until it succeeds. */
   claimed(accountId: string, person: { email: string }): Promise<void>;
   /** The account an API key belongs to, or null. */
   accountOfKey(apiKey: string): string | null;
@@ -102,10 +102,11 @@ function reply(data: Json, status = 200): Response {
 }
 
 async function readText(request: Request): Promise<string> {
-  if (Number(request.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) throw new AgentError("invalid_request");
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) throw new AgentError("invalid_request");
-  return text;
+  try {
+    return new TextDecoder().decode(await readBytes(request, MAX_BODY_BYTES));
+  } catch {
+    throw new AgentError("invalid_request");
+  }
 }
 
 async function readFields(request: Request): Promise<Record<string, unknown>> {
@@ -122,28 +123,34 @@ const ownerOf = (buyer: Buyer) => `${buyer.environment}:${buyer.buyerId}`;
  * Which buyer owns which of your accounts, and the key each buyer's agent uses. Your signed
  * `/r4a` handlers need it with or without agent access (`createAgentHandler` builds on it).
  */
-export function createAccountDirectory(store: AgentStore, accounts: Pick<AgentAccounts, "issueKey" | "revokeKey">) {
+export function createAccountDirectory(store: AgentStore, accounts: Pick<AgentAccounts, "issueKey" | "revokeKey" | "claimed">) {
   async function record(account: string): Promise<AccountRecord | undefined> {
     return (await store.read(accountKey(account))) as AccountRecord | undefined;
   }
 
-  /** Revoke at your product the keys a change retired. */
+  /** Do at your product what a change left pending: revoke the keys it retired, record its claim. */
   async function settle(account: string): Promise<void> {
-    for (const keyId of (await record(account))?.staleKeys ?? []) {
+    const current = await record(account);
+    for (const keyId of current?.staleKeys ?? []) {
       await accounts.revokeKey(account, keyId);
       await store.apply({ type: "key_revoked", account, keyId });
     }
+    const email = current?.claimedBy;
+    if (email) {
+      await accounts.claimed(account, { email });
+      await store.apply({ type: "claim_recorded", account, email });
+    }
   }
 
-  /** The agent's key for the account, issued when it has none and may hold one. */
-  async function agentKey(account: string): Promise<string | null> {
+  /** The agent's key for the account, of this scope, issued when it has none and may hold one. */
+  async function agentKey(account: string, scope: "trial" | "full"): Promise<string | null> {
     await settle(account);
     const current = await record(account);
-    if (current?.key) return current.key.apiKey;
     const grant = keyGrant(current, Date.now());
-    if (!grant) return null;
+    if (grant?.scope !== scope) return null;
+    if (current?.key) return current.key.apiKey;
     const issued = await accounts.issueKey(account, grant);
-    const outcome = await store.apply({ type: "set_key", account, key: issued });
+    const outcome = await store.apply({ type: "set_key", account, key: issued, scope });
     if (outcome.error || outcome.kept) await accounts.revokeKey(account, issued.id); // lost a race, or no longer allowed
     return outcome.error ? null : (outcome.key as unknown as AgentKey).apiKey;
   }
@@ -176,7 +183,7 @@ export function createAccountDirectory(store: AgentStore, accounts: Pick<AgentAc
     async access(buyer: Buyer, account: string): Promise<{ apiKey: string } | "unknown" | "not_owner" | "restricted"> {
       const status = await check(buyer, account);
       if (status !== "ok") return status;
-      const apiKey = await agentKey(account);
+      const apiKey = await agentKey(account, "full");
       return apiKey ? { apiKey } : "restricted";
     },
   };
@@ -230,9 +237,19 @@ export function createAgentHandler(config: AgentConfig) {
     return { account: p.sub, id: p.jti };
   }
 
-  async function token(account: string, grant: "trial" | "full", expires: number): Promise<Response> {
-    const apiKey = await agentKey(account);
+  /** The agent's key; a failure at your product is worth a retry, and spends no grant. */
+  async function keyFor(account: string, grant: "trial" | "full"): Promise<string> {
+    let apiKey: string | null;
+    try {
+      apiKey = await agentKey(account, grant);
+    } catch {
+      throw new AgentError("temporarily_unavailable", 503);
+    }
     if (!apiKey) throw new AgentError("invalid_grant");
+    return apiKey;
+  }
+
+  function token(account: string, apiKey: string, grant: "trial" | "full", expires: number): Response {
     console.log(JSON.stringify({ event: "agent_access_issued", account, scope: scope(grant) }));
     return reply({ access_token: apiKey, token_type: "Bearer", expires_in: Math.max(0, Math.floor((expires - Date.now()) / 1000)),
       scope: scope(grant), account_id: account, api_url: product.apiUrl,
@@ -283,8 +300,8 @@ export function createAgentHandler(config: AgentConfig) {
     await apply({ type: "claim", account, owner: ownerOf(claim), email: claim.email, codeHash: await sha256(claim.userCode),
       proofId: claim.proofId, proofExpires: claim.expiresAt * 1000, source: claim.identitySource, authTime: claim.authenticatedAt,
       issuedAt: claim.issuedAt, credentialExpires: Date.now() + credentialMs, assertionId });
-    await accounts.claimed(account, { email: claim.email });
-    await settle(account);
+    // Until your product records the claim the account gets no key; the agent's next request retries.
+    await settle(account).catch(() => console.log(JSON.stringify({ event: "agent_settle_failed", account })));
     console.log(JSON.stringify({ event: "agent_claimed", account }));
     return reply({ status: "claimed", account_id: account, identity_assertion: await assertion(account, assertionId) });
   }
@@ -359,14 +376,19 @@ export function createAgentHandler(config: AgentConfig) {
     if (path === "/oauth2/token") {
       if (data.grant_type === JWT_GRANT) {
         const own = await ownAssertion(data.assertion);
+        // The key before the assertion is spent, so a failure at your product leaves it usable.
+        const grant = (await record(own.account))?.agent?.status === "claimed" ? "full" : "trial";
+        const apiKey = await keyFor(own.account, grant);
         const outcome = await apply({ type: "exchange", account: own.account, assertionId: own.id });
-        return token(own.account, outcome.scope as "trial" | "full", outcome.expires as number);
+        // A claim since then changed the assertion and retired that key: the exchange fails.
+        if (outcome.scope !== grant) throw new AgentError("invalid_grant");
+        return token(own.account, apiKey, grant, outcome.expires as number);
       }
       if (data.grant_type === CLAIM_GRANT) {
         const claim = parseClaimToken(data.claim_token);
         if (data.registration_id && data.registration_id !== claim.account) throw new AgentError("expired_token");
         const outcome = await apply({ type: "resume", account: claim.account, claimHash: await sha256(claim.secret) });
-        return token(claim.account, "full", outcome.expires as number);
+        return token(claim.account, await keyFor(claim.account, "full"), "full", outcome.expires as number);
       }
       return failure("unsupported_grant_type");
     }
@@ -375,7 +397,13 @@ export function createAgentHandler(config: AgentConfig) {
       const account = apiKey ? accounts.accountOfKey(apiKey) : null;
       if (account) {
         await store.apply({ type: "revoke_token", account, apiKey });
-        await settle(account).catch(() => console.log(JSON.stringify({ event: "agent_revocation_failed", reason: "key_revocation_unavailable" })));
+        try {
+          await settle(account);
+        } catch {
+          // RFC 7009: a 503 tells the agent its token still works; its retry revokes what is left.
+          console.log(JSON.stringify({ event: "agent_revocation_failed", reason: "key_revocation_unavailable" }));
+          return failure("temporarily_unavailable", 503);
+        }
       }
       return new Response(null, { status: 200, headers: { "Cache-Control": "no-store" } });
     }

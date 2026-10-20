@@ -175,11 +175,12 @@ needs the user's consent again.
 | \`unsupported_grant_type\` | \`/oauth2/token\` | Use one of the two grants above. |
 | \`not_enabled\` (404) | any | Agent registration is off on this deployment. |
 | \`rate_limited\` (429) | any | Back off and retry later. |
+| \`temporarily_unavailable\` (503) | \`/oauth2/token\`, \`/oauth2/revoke\` | Retry the same request in a few seconds; a token you were revoking still works. |
 
 ## Revocation
 
 - **Credential layer:** \`POST ${issuer}/oauth2/revoke\` with \`token=<access_token>\` (form-encoded);
-  always 200.
+  200 once it no longer works.
 - **Registration layer:** Rose POSTs a revocation Security Event Token to \`${issuer}/agent/events\`
   when the user unlinks ${name}. You notice it as \`invalid_grant\`: restart at Step 3.
 `;

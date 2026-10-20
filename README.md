@@ -270,7 +270,8 @@ a trial key allows (`trialLimit`); see `AgentConfig`. You supply two things:
 
 - **`accounts`** (`AgentAccounts`): create an account, issue and revoke a key with your own
   API-key code (a trial key carries `expiresAt` and `maxUses`: enforce them), record the
-  person who claimed an account, and find the account a key belongs to.
+  person who claimed an account (retried until it succeeds: make it idempotent), and find the
+  account a key belongs to.
 - **`store`** (`AgentStore`): read a record, and apply one change in one transaction over the
   records `agentChangeKeys` names, with `applyAgentChange`. Every check of a claim or a
   revocation happens inside that transaction, so concurrent claims cannot both win.
