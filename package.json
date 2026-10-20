@@ -1,6 +1,6 @@
 {
   "name": "@userose/vendor-sdk",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "private": true,
   "description": "Server-side SDK for connecting a vendor product to Rose for Agents.",
   "type": "module",
