@@ -52,6 +52,7 @@ export interface BuyerRecord {
 }
 
 export type AgentChange =
+  | { type: "consume_trial_proof"; id: string; expires: number }
   | { type: "register"; account: string; state: AgentState }
   | { type: "code"; account: string; claimHash: string; email: string; codeHash: string }
   | { type: "claim"; account: string; owner: string; email: string; codeHash: string; proofId: string; proofExpires: number;
@@ -75,6 +76,8 @@ export function buyerKey(owner: string): string { return `buyer:${owner}`; }
 /** The records a change reads and may write: load these, locked, before `applyAgentChange`. */
 export function agentChangeKeys(change: AgentChange): string[] {
   switch (change.type) {
+    case "consume_trial_proof":
+      return [`trial-proof:${change.id.slice(0, 2)}`];
     case "claim":
       return [accountKey(change.account), buyerKey(change.owner)];
     case "provision":
@@ -136,6 +139,20 @@ export function applyAgentChange(change: AgentChange, records: Record<string, Js
   const done = (outcome: AgentOutcome = {}) => ({ writes, outcome: { ok: true, ...outcome } });
 
   switch (change.type) {
+    case "consume_trial_proof": {
+      // Fixed shards avoid one permanent row per anonymous request. Expired entries are
+      // pruned on each redemption; a full shard fails closed instead of evicting live proofs.
+      if (!/^[0-9a-f]{64}$/.test(change.id) || !Number.isSafeInteger(change.expires) ||
+          change.expires <= now || change.expires > now + 600_000) return fail("invalid_proof");
+      const key = `trial-proof:${change.id.slice(0, 2)}`;
+      const seen = fresh(load<Record<string, number>>(key) ?? {}, now);
+      if (seen[change.id]) return fail("replay_detected");
+      if (Object.keys(seen).length >= 1024) return fail("proof_capacity_reached");
+      seen[change.id] = change.expires;
+      writes[key] = seen;
+      return done();
+    }
+
     case "register": {
       if (records[accountKey(change.account)] !== undefined) return fail("conflict");
       save(accountKey(change.account), { agent: change.state });

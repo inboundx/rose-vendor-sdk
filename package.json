@@ -1,14 +1,24 @@
 {
   "name": "@userose/vendor-sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Server-side SDK for connecting a vendor product to Rose for Agents.",
   "type": "module",
   "license": "Apache-2.0",
-  "engines": { "node": ">=22" },
-  "files": ["dist", "README.md", "LICENSE", "examples"],
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "examples"
+  ],
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
   "types": "./dist/index.d.ts",
   "scripts": {
@@ -17,6 +27,18 @@
     "pretest": "npm run build",
     "test": "node --test test/*.test.mjs"
   },
-  "dependencies": { "jose": "6.2.12" },
-  "devDependencies": { "typescript": "5.9.3" }
+  "dependencies": {
+    "capjs-core": "0.1.5",
+    "jose": "6.2.12"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3"
+  },
+  "imports": {
+    "#hashwx-module": {
+      "workerd": "./dist/hashwx-module.workerd.js",
+      "default": "./dist/hashwx-module.js"
+    }
+  }
 }

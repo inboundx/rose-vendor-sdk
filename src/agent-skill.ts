@@ -78,6 +78,28 @@ Response (200): \`registration_id\`, \`registration_type\`, \`identity_assertion
 \`post_claim_scopes\` (\`["${scopes.full}"]\`). ${name} also returns a \`claim\` block, so you can skip 4a.
 Go to Step 5 to use the trial now.
 
+
+If this returns HTTP 428 with \`error: "proof_of_work_required"\`, no account was created.
+Solve the returned \`proof_of_work\` HashWX challenge yourself; no browser or user sign-in is
+needed. Save the complete JSON response to \`challenge.json\`, then in a temporary directory:
+
+\`\`\`sh
+npm install capjs-core@0.1.5
+curl --fail ${issuer}/agent/proof-of-work/solver -o solve-proof.mjs
+node solve-proof.mjs challenge.json > registration.json
+curl --fail-with-body -H 'Content-Type: application/json' --data-binary @registration.json ${issuer}/agent/identity
+\`\`\`
+
+The solver requires Node 22 or newer, stops at expiry and prints the retry request:
+\`{"type":"anonymous","proof_of_work":{"token":"...","solutions":[{"nonce":"..."}, ...]}}\`.
+Each challenge expires after five minutes and can create one registration only. HTTP 428
+means solve the fresh challenge; HTTP 409 \`replay_detected\` means that proof was already
+used. A failed account creation also needs a fresh challenge. Work budgets vary; they do
+not promise a fixed delay. Keep the registration response and reuse its credentials.
+
+Agents connected through Rose with a verified Rose ID skip this puzzle using Rose's signed
+registration request. A self-declared Rose ID, email or copied bearer token cannot skip it.
+
 ### service_auth
 
 \`\`\`http

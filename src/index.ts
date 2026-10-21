@@ -4,3 +4,4 @@ export { createVendorHandler, type VendorConfig, type VendorHandlers } from "./v
 export { createHandoverVerifier, REVOKED_EVENT, type HandoverConfig, type VerifiedClaim, type VerifiedRevocation } from "./handover.js";
 export { createAccountDirectory, createAgentHandler, CLAIM_GRANT, JWT_GRANT, type AgentAccounts, type AgentConfig, type AgentStore } from "./agent.js";
 export { agentChangeKeys, applyAgentChange, type AccountRecord, type AgentChange, type AgentKey, type AgentOutcome, type AgentState, type BuyerRecord } from "./agent-state.js";
+export type { TrialProtection, TrialProtectionLevel } from "./trial-protection.js";

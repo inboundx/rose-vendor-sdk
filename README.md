@@ -78,7 +78,7 @@ Use Node.js 22 or later with ESM, or a Web Crypto-capable server runtime. Instal
 tag in your server project; npm builds it on install:
 
 ```bash
-npm install github:inboundx/rose-vendor-sdk#v0.3.0
+npm install github:inboundx/rose-vendor-sdk#v0.4.0
 ```
 
 The package includes compiled JavaScript, TypeScript declarations and an integration
@@ -92,7 +92,7 @@ repository, and replace the bracketed parts:
 ```text
 Connect this product to Rose for Agents with the Rose vendor SDK.
 
-1. Install it in the server project: npm install github:inboundx/rose-vendor-sdk#v0.3.0
+1. Install it in the server project: npm install github:inboundx/rose-vendor-sdk#v0.4.0
    Then read node_modules/@userose/vendor-sdk/README.md in full. It is the contract; follow
    it over your own assumptions.
 2. Find how this server routes HTTP requests, how it stores accounts, and how it runs the
@@ -355,3 +355,41 @@ absolute output directory as the first argument.
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
+
+
+### Anonymous trial protection (v0.4.0)
+
+Set `trialProtection: "rose"` on `createAgentHandler` to use the **Proof of work**
+setting in Config Studio → Rose for Agents → Agent access → Anonymous agents. It reads the policy from the configured identity
+broker and validates the vendor audience and environment. An unavailable or invalid policy
+fails anonymous registrations closed with 503. Verified Rose requests remain independent of
+this lookup. Omitting the option, or `"off"`, preserves the existing anonymous signup behavior.
+
+For local or vendor-managed settings use `"low"`, `"medium"`, or `"high"`: respectively
+250,000, 1,000,000, or 3,000,000 expected HashWX operations split across four puzzles. These
+are work budgets, not timing guarantees. No browser detection, CAPTCHA or human approval is
+introduced. Fresh valid proofs can still create fresh trials; retain product quotas and rate limits.
+
+An anonymous registration first receives HTTP 428 with `proof_of_work` in Cap format 2.
+The `token` is an opaque, purpose-specific ES256 JWT; it is not a Cap redemption token.
+The vendor's `/auth.md` documents the runnable Node solver at `/agent/proof-of-work/solver`
+and the retry contract. The solver requires Node 22 and `capjs-core@0.1.5`.
+
+`AgentStore.apply` must continue applying `agentChangeKeys` and `applyAgentChange` atomically.
+The new `consume_trial_proof` change uses bounded expiring replay maps, before account creation;
+a creation failure consumes that proof and the agent must request a new one. Existing store
+adapters using these helpers need no schema change. Do not enumerate only known change types.
+
+The Rose connector bypasses work only with a valid HTTP Message Signature and a signed UUID
+`registration_nonce`. The signature binds the body, destination and buyer and must match the
+configured environment. It grants trial access only, never ownership or claimed credentials.
+`roseRequestKeys` replaces published verification directories for local development/tests only,
+like `createVendorHandler.keys`. Never trust a body field or unsigned buyer header.
+
+Runtime verification imports only Cap's pinned `hashwx.wasm`, not its instrumentation or
+bundler modules. The upstream binary is built from `tevador/hashwx` commit
+`74b567a31276a4c5d7cb232a5b7639467f49f961`, SHA-256
+`b1a0dbb3ef444d3c7069e0a5e0a0273ffa4cf8fef62cbbe43761c02f7cd6aff5`.
+Worker bundlers must honor the `workerd` package condition and load `.wasm` as a WebAssembly
+module (Wrangler does this). Node reads the same installed binary at module initialization;
+no request's pending initialization promise is shared.

@@ -20,7 +20,7 @@ export function json(value: Json, status = 200): Response {
   } });
 }
 
-export async function readBytes(request: Request, limit: number): Promise<Uint8Array> {
+export async function readBytes(request: Request | Response, limit: number): Promise<Uint8Array> {
   if (Number(request.headers.get("content-length") ?? 0) > limit) {
     throw new VendorError(413, "Request too large");
   }
