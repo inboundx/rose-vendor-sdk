@@ -450,6 +450,26 @@ export function createAgentHandler(config: AgentConfig) {
       return response;
     },
 
+    /**
+     * Wrap your API's responses: a 401 gains the challenge auth.md discovery starts from
+     * (RFC 9728) and, in a JSON body, a pointer to auth.md. Without them an agent with no key
+     * concludes that only a person can sign up. A challenge you already send is kept.
+     */
+    async challenge(response: Response): Promise<Response> {
+      if (response.status !== 401) return response;
+      const headers = new Headers(response.headers);
+      if (!headers.has("WWW-Authenticate")) headers.set("WWW-Authenticate", `Bearer resource_metadata="${issuer}/.well-known/oauth-protected-resource"`);
+      const init = { status: 401, statusText: response.statusText, headers };
+      // Only a plain JSON body is rewritten; any other body keeps its exact bytes.
+      if (!headers.get("Content-Type")?.includes("json") || headers.has("Content-Encoding")) return new Response(response.body, init);
+      const bytes = await response.arrayBuffer();
+      let body: unknown = null;
+      try { body = JSON.parse(new TextDecoder().decode(bytes)); } catch { body = null; }
+      if (!body || typeof body !== "object" || Array.isArray(body)) return new Response(bytes, init);
+      headers.delete("Content-Length");
+      return Response.json({ ...body, agent_registration: `No API key? An AI agent can start a trial itself: ${issuer}/auth.md` }, init);
+    },
+
     /** For your signed `/r4a` handlers: the same store, so a claim and a provisioning agree. */
     contract: directory,
   };

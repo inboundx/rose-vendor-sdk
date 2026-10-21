@@ -38,6 +38,7 @@ import { type AgentAccounts, type AgentConfig, type HandoverConfig, type Json, t
 declare const roseAgentConfiguration: Omit<AgentConfig, 'accounts' | 'store'>;
 declare const yourAccounts: AgentAccounts;
 declare const incomingRequest: Request;
+declare function yourApi(request: Request): Promise<Response>;
 declare const yourRecords: {
   get(key: string): Promise<Json | undefined>;
   transaction<T>(work: (tx: { getForUpdate(key: string): Promise<Json | undefined>; put(key: string, value: Json): Promise<void>; delete(key: string): Promise<void> }) => Promise<T>): Promise<T>;
