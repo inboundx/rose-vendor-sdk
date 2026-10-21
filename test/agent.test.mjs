@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createHash, generateKeyPairSync, sign } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { exportJWK, exportPKCS8, generateKeyPair, SignJWT } from 'jose';
 import { agentChangeKeys, applyAgentChange, CLAIM_GRANT, createAgentHandler, JWT_GRANT } from '@userose/vendor-sdk';
 
@@ -197,7 +201,7 @@ test('the agent revokes its own key; another key changes nothing', async () => {
   const r = await register(v), buyer = buyerId();
   await complete(v, r, buyer);
   const key = (await json(await resume(v, r))).access_token;
-  assert.equal((await v.post('/oauth2/revoke', { token: `${key.slice(0, -1)}0` })).status, 200);
+  assert.equal((await v.post('/oauth2/revoke', { token: `${key.slice(0, -1)}${key.endsWith('0') ? '1' : '0'}` })).status, 200);
   assert.equal(v.accounts.call(key), 200);
   assert.equal((await v.post('/oauth2/revoke', { token: key })).status, 200);
   assert.equal(v.accounts.call(key), 401);
@@ -355,4 +359,164 @@ test('a 401 body the challenge cannot extend keeps its exact bytes and headers',
   const empty = await agent.challenge(new Response(null, { status: 401 }));
   assert.equal(empty.headers.get('Content-Type'), null);
   assert.equal(await empty.text(), '');
+});
+
+
+// Exercises the exact solver artifact delivered to an autonomous client, including compiled
+// HashWX execution. Put it below the SDK root so Node resolves its installed Cap dependency.
+async function solveChallenge(v, challenge) {
+  const dir = mkdtempSync(fileURLToPath(new URL('../.pow-test-', import.meta.url)));
+  try {
+    const solver = await v.agent.handle(new Request(`${ORIGIN}/agent/proof-of-work/solver`));
+    assert.equal(solver.status, 200);
+    writeFileSync(`${dir}/solve.mjs`, await solver.text());
+    return JSON.parse(execFileSync(process.execPath, [`${dir}/solve.mjs`], {
+      input: JSON.stringify(challenge), encoding: 'utf8', timeout: 30000,
+    }));
+  } finally { rmSync(dir, {recursive: true, force: true}); }
+}
+
+const signedKey = generateKeyPairSync('ed25519');
+const signedJwk = { ...signedKey.publicKey.export({format: 'jwk'}), kid: 'test-pow' };
+function registrationHeaders(body, options = {}) {
+  const buyer = options.buyer ?? '3f2a8c1e-5b7d-4e9a-9c1f-2d6b8e4a7c10';
+  const created = options.created ?? Math.floor(Date.now() / 1000);
+  const params = `("@method" "@authority" "@path" "content-digest" "x-r4a-buyer");created=${created};expires=${created + 300};keyid="${options.kid ?? 'test-pow'}";alg="ed25519";tag="r4a-contract"`;
+  const digest = `sha-256=:${createHash('sha256').update(body).digest('base64')}:`;
+  const base = [`"@method": POST`, `"@authority": ${options.host ?? 'vendor.example'}`, '"@path": /agent/identity',
+    `"content-digest": ${digest}`, `"x-r4a-buyer": ${buyer}`, `"@signature-params": ${params}`].join('\n');
+  return { 'Content-Digest': digest, 'X-R4A-Buyer': buyer, 'Signature-Input': `r4a=${params}`,
+    Signature: `r4a=:${sign(null, Buffer.from(base), signedKey.privateKey).toString('base64')}:` };
+}
+
+test('trial protection presets challenge before provisioning; service_auth remains claim-only', async () => {
+  for (const [level, work] of [['low', 250000], ['medium', 1000000], ['high', 3000000]]) {
+    const v = await setup({trialProtection: level});
+    const response = await v.post('/agent/identity', {type: 'anonymous', rose_id: 'forged'});
+    assert.equal(response.status, 428);
+    const {proof_of_work: proof} = await response.json();
+    assert.equal(proof.format, 2);
+    assert.equal(proof.challenges.reduce((sum, p) => sum + p.payload.d, 0), work);
+    assert.ok(proof.expires > Date.now());
+    assert.equal(v.store.data.size, 0);
+    const service = await register(v, 'service_auth');
+    assert.equal(service.registration_id, 'acct_1'); // challenge allocated no product account
+    assert.equal(service.identity_assertion, undefined);
+    assert.equal((await complete(v, service, buyerId())).status, 200);
+  }
+});
+
+test('a real solver gets a limited trial; concurrent proof redemption creates one account', async () => {
+  const v = await setup({trialProtection: 'low'});
+  const challenge = await json(await v.post('/agent/identity', {type: 'anonymous'}));
+  const body = await solveChallenge(v, challenge);
+  const responses = await Promise.all(Array.from({length: 8}, () => v.post('/agent/identity', body)));
+  assert.deepEqual(responses.map(r => r.status).sort(), [200, 409, 409, 409, 409, 409, 409, 409]);
+  const registration = await json(responses.find(r => r.status === 200));
+  const trial = await json(await exchange(v, registration.identity_assertion));
+  assert.equal(v.accounts.call(trial.access_token), 200);
+  assert.equal(v.accounts.call(trial.access_token), 200);
+  assert.equal(v.accounts.call(trial.access_token), 403);
+  assert.equal([...v.store.data.keys()].filter(k => k.startsWith('account:')).length, 1);
+});
+
+test('tampering, expired proofs, policy changes and malformed nonces never create accounts', async () => {
+  const v = await setup({trialProtection: 'low'});
+  const challenge = await json(await v.post('/agent/identity', {type: 'anonymous'}));
+  const body = await solveChallenge(v, challenge);
+  const token = body.proof_of_work.token;
+  const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url'));
+  for (const changes of [
+    {scope: JSON.stringify(['rose-anonymous-trial-v1', ORIGIN, 'production', 'low'])},
+    {iat: Math.floor(Date.now()/1000)-301, exp: Math.floor(Date.now()/1000)-1},
+    {challenges: payload.challenges.map(p => ({...p, payload: {...p.payload, d: 1}}))},
+  ]) {
+    const altered = await new SignJWT({...payload, ...changes}).setProtectedHeader({typ:'rose-trial-pow+jwt', alg:'ES256', kid:'vendor'}).sign(vendor.privateKey);
+    assert.equal((await v.post('/agent/identity', {...body, proof_of_work:{...body.proof_of_work, token:altered}})).status, 428);
+  }
+  const invalid = structuredClone(body);
+  invalid.proof_of_work.solutions[0].nonce = '-1';
+  assert.equal((await v.post('/agent/identity', invalid)).status, 428);
+  invalid.proof_of_work.solutions[0].nonce = '18446744073709551616';
+  assert.equal((await v.post('/agent/identity', invalid)).status, 428);
+  invalid.proof_of_work.token += 'broken';
+  assert.equal((await v.post('/agent/identity', invalid)).status, 428);
+  const higher = await setup({trialProtection:'high'});
+  assert.equal((await higher.post('/agent/identity', body)).status, 428);
+  assert.equal(v.store.data.size, 0);
+  assert.equal((await v.post('/agent/identity', body)).status, 200); // invalid attempts did not consume valid proof
+});
+
+test('proof store failure fails closed before provisioning', async () => {
+  const v = await setup({trialProtection:'low'});
+  const body = await solveChallenge(v, await json(await v.post('/agent/identity', {type:'anonymous'})));
+  const apply = v.store.apply;
+  v.store.apply = async () => { throw new Error('store unavailable'); };
+  assert.equal((await v.post('/agent/identity', body)).status, 503);
+  v.store.apply = apply;
+  assert.equal((await json(await v.post('/agent/identity', body))).registration_id, 'acct_1');
+});
+
+test('Rose policy is audience/environment bound and unavailable policies fail closed', async t => {
+  let answer = {level:'medium', audience:ORIGIN, environment:'test'};
+  const seen = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    seen.push([url, options]);
+    if (answer === 'redirect') return new Response(null, {status:302, headers:{Location:'https://elsewhere.example/policy'}});
+    return answer === null ? new Response('unavailable', {status:503}) : Response.json(answer);
+  });
+  const v = await setup({trialProtection:'rose'});
+  assert.equal((await v.post('/agent/identity', {type:'anonymous'})).status, 428);
+  assert.equal(seen[0][0], 'https://identity.example/trial-policy/vendor');
+  assert.equal(seen[0][1].redirect, 'manual');
+  for (const bad of [null, 'redirect', {level:'off',audience:'https://evil.example',environment:'test'},
+    {level:'off',audience:ORIGIN,environment:'production'}, {level:'invalid',audience:ORIGIN,environment:'test'}]) {
+    answer = bad;
+    assert.equal((await v.post('/agent/identity', {type:'anonymous'})).status, 503);
+  }
+  assert.equal(v.store.data.size, 0);
+  answer = {level:'off',audience:ORIGIN,environment:'test'};
+  assert.equal((await v.post('/agent/identity', {type:'anonymous'})).status, 200);
+});
+
+test('verified Rose ID bypasses even unavailable policy; signed nonce cannot replay', async t => {
+  t.mock.method(globalThis, 'fetch', async () => { throw new Error('must not fetch policy'); });
+  const v = await setup({trialProtection:'rose', roseRequestKeys:{keys:[signedJwk]}});
+  const body = JSON.stringify({type:'anonymous', registration_nonce:crypto.randomUUID()});
+  const headers = registrationHeaders(body);
+  const responses = await Promise.all([v.post('/agent/identity',body,headers),v.post('/agent/identity',body,headers)]);
+  assert.deepEqual(responses.map(r => r.status).sort(), [200,409]);
+  const registration = await json(responses.find(r => r.status === 200));
+  assert.equal(registration.registration_type, 'anonymous');
+  const trial = await json(await exchange(v,registration.identity_assertion));
+  assert.equal(trial.scope,'thing:trial');
+});
+
+test('signature forgery, missing nonce and wrong environment cannot exempt a caller', async () => {
+  const productionJwk = {...signedJwk, kid:'production-pow'};
+  const v = await setup({trialProtection:'low',roseRequestKeys:{keys:[signedJwk,productionJwk]}});
+  const body = JSON.stringify({type:'anonymous',registration_nonce:crypto.randomUUID()});
+  for (const headers of [
+    {'X-R4A-Buyer':'3f2a8c1e-5b7d-4e9a-9c1f-2d6b8e4a7c10'},
+    registrationHeaders(body,{kid:'production-pow'}),
+    registrationHeaders(body,{host:'evil.example'}),
+    registrationHeaders(body,{created:Math.floor(Date.now()/1000)-301}),
+    registrationHeaders(body+' '),
+  ]) assert.equal((await v.post('/agent/identity',body,headers)).status,401);
+  const noNonce = JSON.stringify({type:'anonymous'});
+  assert.equal((await v.post('/agent/identity',noNonce,registrationHeaders(noNonce))).status,401);
+  assert.equal(v.store.data.size,0);
+});
+
+test('proof replay shards prune expiry and never evict live proofs when full', () => {
+  const now = Date.now(), id = 'ab'+'0'.repeat(62);
+  const change = {type:'consume_trial_proof',id,expires:now+300000};
+  const key = agentChangeKeys(change)[0];
+  const records = {[key]: {[id]:now-1, ['ab'+'1'.repeat(62)]:now+1}};
+  const next = applyAgentChange(change,records,now);
+  assert.equal(next.outcome.ok,true);
+  assert.equal(Object.keys(next.writes[key]).length,2);
+  assert.equal(applyAgentChange(change,next.writes,now).outcome.error,'replay_detected');
+  const full = Object.fromEntries(Array.from({length:1024}, (_,i)=>['ab'+(i+1).toString(16).padStart(62,'0'),now+300000]));
+  assert.equal(applyAgentChange(change,{[key]:full},now).outcome.error,'proof_capacity_reached');
 });

@@ -10,6 +10,9 @@ import { type Buyer, EMAIL, type Environment, type Json, origin as httpsOrigin, 
 import { type AccountRecord, accountKey, type AgentChange, type AgentKey, type AgentOutcome, type AgentState,
   type BuyerRecord, buyerKey, CLAIM_SECONDS, keyGrant } from "./agent-state.js";
 import { agentSkill } from "./agent-skill.js";
+import { trialGate, type TrialProtection } from "./trial-protection.js";
+import type { Jwks } from "./signature.js";
+import { proofSolver } from "./proof-solver.js";
 
 export const JWT_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 export const CLAIM_GRANT = "urn:workos:agent-auth:grant-type:claim";
@@ -70,6 +73,10 @@ export interface AgentConfig {
   };
   /** Calls a trial key allows, during the 15 minutes a registration can be claimed. */
   trialLimit: number;
+  /** Anonymous trial friction. Omitted/off preserves existing access; rose reads the vendor's Rose setting. */
+  trialProtection?: TrialProtection;
+  /** Replaces Rose's request-signing directories, for local development and tests only. */
+  roseRequestKeys?: Jwks;
   /** Lifetime of a claimed agent's key. Default one hour; renewing it needs the person's consent. */
   credentialSeconds?: number;
   accounts: AgentAccounts;
@@ -119,8 +126,7 @@ async function readText(request: Request): Promise<string> {
   }
 }
 
-async function readFields(request: Request): Promise<Record<string, unknown>> {
-  const raw = await readText(request);
+function readFields(request: Request, raw: string): Record<string, unknown> {
   if (request.headers.get("content-type")?.startsWith("application/x-www-form-urlencoded")) return Object.fromEntries(new URLSearchParams(raw));
   const parsed: unknown = JSON.parse(raw);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new AgentError("invalid_request");
@@ -273,7 +279,7 @@ export function createAgentHandler(config: AgentConfig) {
     return { account: match[1]!, secret: match[2]! };
   }
 
-  async function register(data: Record<string, unknown>): Promise<Response> {
+  async function register(data: Record<string, unknown>, request: Request, bytes: Uint8Array): Promise<Response> {
     if (data.type === "identity_assertion") {
       if (data.assertion_type !== ID_JAG) return failure("unsupported_assertion_type");
       return complete(data.assertion);
@@ -281,6 +287,10 @@ export function createAgentHandler(config: AgentConfig) {
     if (data.type !== "anonymous" && data.type !== "service_auth") return failure("unsupported_identity_type");
     const hint = data.login_hint;
     if (data.type === "service_auth" && (typeof hint !== "string" || !EMAIL.test(hint))) return failure("invalid_login_hint");
+    if (data.type === "anonymous") {
+      const denied = await trialGate(config, request, data, bytes);
+      if (denied) return denied;
+    }
     const account = await accounts.create(data.type);
     if (!ACCOUNT_ID.test(account)) throw new Error("AgentAccounts.create returned an invalid account id");
     const claimSecret = secret(), code = userCode(), assertionId = crypto.randomUUID();
@@ -353,6 +363,9 @@ export function createAgentHandler(config: AgentConfig) {
 
   async function route(request: Request, path: string): Promise<Response> {
     if (request.method === "GET") {
+      if (path === "/agent/proof-of-work/solver") return new Response(proofSolver, {
+        headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store" },
+      });
       if (path.startsWith("/agent/admin/accounts/")) return snapshot(request, path.slice("/agent/admin/accounts/".length));
       if (path === "/auth.md") return new Response(skill, { headers: { "Content-Type": "text/markdown; charset=utf-8", "Cache-Control": "no-store" } });
       if (path === "/.well-known/oauth-protected-resource") {
@@ -374,8 +387,10 @@ export function createAgentHandler(config: AgentConfig) {
     }
     if (request.method !== "POST") return failure("not_found", 404);
     if (path === "/agent/events") return revokeOwner(await readText(request));
-    const data = await readFields(request);
-    if (path === "/agent/identity") return register(data);
+    let bytes: Uint8Array;
+    try { bytes = await readBytes(request, MAX_BODY_BYTES); } catch { throw new AgentError("invalid_request"); }
+    const data = readFields(request, new TextDecoder().decode(bytes));
+    if (path === "/agent/identity") return register(data, request, bytes);
     if (path === "/agent/identity/claim/complete") return complete(data.identity_assertion);
     if (path === "/agent/identity/claim") {
       const claim = CLAIM_TOKEN.exec(typeof data.claim_token === "string" ? data.claim_token : "");
