@@ -5,12 +5,17 @@ export interface SkillText {
   name: string;
   about: string;
   apiUrl: string;
+  mcpUrl?: string | undefined;
   usage: string;
   scopes: { trial: string; full: string };
   trialLimit: number;
 }
 
-export function agentSkill({ issuer, name, about, apiUrl, usage, scopes, trialLimit }: SkillText): string {
+export function agentSkill({ issuer, name, about, apiUrl, mcpUrl, usage, scopes, trialLimit }: SkillText): string {
+  const mcp = mcpUrl ? `${name} is an MCP server: connect to \`${mcpUrl}\` (Streamable HTTP) with
+\`Authorization: Bearer <access_token>\`, or call its tools over HTTP as below.
+
+` : "";
   return `# auth.md
 
 You are an agent. ${name} supports **agentic registration**: discover, register, (claim if
@@ -147,12 +152,12 @@ grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=<identity_asser
 \`\`\`
 
 Response (200): \`{"access_token", "token_type": "Bearer", "expires_in", "scope", "account_id",
-"api_url"}\`. Each assertion exchanges once and expires after 5 minutes; \`invalid_grant\` means
+"api_url"${mcpUrl ? ', "mcp_url"' : ""}}\`. Each assertion exchanges once and expires after 5 minutes; \`invalid_grant\` means
 restart at Step 3.
 
 ## Step 6 — Use the access_token
 
-${usage}
+${mcp}${usage}
 
 The access token is ${name}'s API key. Claimed credentials expire within one hour; renewing them
 needs the user's consent again.

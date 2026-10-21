@@ -78,7 +78,7 @@ Use Node.js 22 or later with ESM, or a Web Crypto-capable server runtime. Instal
 tag in your server project; npm builds it on install:
 
 ```bash
-npm install github:inboundx/rose-vendor-sdk#v0.2.0
+npm install github:inboundx/rose-vendor-sdk#v0.3.0
 ```
 
 The package includes compiled JavaScript, TypeScript declarations and an integration
@@ -92,7 +92,7 @@ repository, and replace the bracketed parts:
 ```text
 Connect this product to Rose for Agents with the Rose vendor SDK.
 
-1. Install it in the server project: npm install github:inboundx/rose-vendor-sdk#v0.2.0
+1. Install it in the server project: npm install github:inboundx/rose-vendor-sdk#v0.3.0
    Then read node_modules/@userose/vendor-sdk/README.md in full. It is the contract; follow
    it over your own assumptions.
 2. Find how this server routes HTTP requests, how it stores accounts, and how it runs the
@@ -301,6 +301,23 @@ a bare `401` concludes that only a person can sign up; the challenge
 (`WWW-Authenticate: Bearer resource_metadata=…`, RFC 9728) is where auth.md discovery starts,
 and a JSON body also gains a one-line pointer to `/auth.md`. Link `/auth.md` from your API docs
 and `llms.txt` as well: in Rose's tests, that link is what agents followed.
+
+#### When your product is an MCP server
+
+An agent can use your MCP before anyone signs in, and keep the account once the person claims it:
+
+- **Trial token:** `issueKey` returns whatever token your MCP accepts as `Authorization: Bearer`
+  (an API key, or an access token from your authorization server) with the trial's `expiresAt`
+  and `maxUses`. The claim retires it and the agent resumes with a full one.
+- **`product.mcpUrl`:** auth.md and the token response (`mcp_url`) point the agent to your MCP.
+- **`authorizationServer`:** when your own OAuth server (the sign-in MCP clients use for people)
+  shares this origin, pass its metadata and token handler. The SDK merges the metadata into
+  `/.well-known/oauth-authorization-server` and hands `/oauth2/token` every grant it does not run
+  (`authorization_code`, `refresh_token`…). Your other routes (`/oauth2/authorize`,
+  `/oauth2/register`, your MCP's `/.well-known/oauth-protected-resource/<path>`) stay yours:
+  `handle` returns null for them.
+- **After the claim**, the person signing in to your product normally should reach the claimed
+  account: `claimed` gives you their verified email to link it.
 
 `agentAccess.contract` (or `createAccountDirectory(store, accounts)` without agent access)
 gives your signed `/r4a` handlers the same records: `lookup`, `provision`, `owns`, `check` and

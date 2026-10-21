@@ -57,6 +57,16 @@ export interface AgentConfig {
     /** How to call the API with the access token, shown in auth.md (Markdown). */
     usage: string;
     scopes: { trial: string; full: string };
+    /** When your product is an MCP server: its URL. auth.md and the token response point the agent to it. */
+    mcpUrl?: string;
+  };
+  /**
+   * Your own OAuth server, when it shares this origin (an MCP client's sign-in for people): its
+   * metadata is merged into the SDK's, and `/oauth2/token` hands it every grant the SDK does not run.
+   */
+  authorizationServer?: {
+    metadata: Record<string, Json>;
+    token(fields: Record<string, unknown>, request: Request): Promise<Response>;
   };
   /** Calls a trial key allows, during the 15 minutes a registration can be claimed. */
   trialLimit: number;
@@ -193,6 +203,7 @@ export function createAccountDirectory(store: AgentStore, accounts: Pick<AgentAc
 export function createAgentHandler(config: AgentConfig) {
   const issuer = httpsOrigin(config.origin);
   const consent = trustedUrl(config.consent.url);
+  const mcpUrl = config.product.mcpUrl === undefined ? undefined : trustedUrl(config.product.mcpUrl).toString();
   const browserOrigin = httpsOrigin(config.consent.browserOrigin);
   if (!["test", "production"].includes(config.environment)) throw new Error("Invalid environment");
   if (!Number.isSafeInteger(config.trialLimit) || config.trialLimit < 1 || config.trialLimit > 100) throw new Error("Invalid trialLimit");
@@ -205,7 +216,7 @@ export function createAgentHandler(config: AgentConfig) {
   const scope = (grant: "trial" | "full") => product.scopes[grant];
   const directory = createAccountDirectory(store, accounts);
   const { record, settle, agentKey } = directory;
-  const skill = agentSkill({ issuer, ...product, trialLimit: config.trialLimit });
+  const skill = agentSkill({ issuer, ...product, mcpUrl, trialLimit: config.trialLimit });
 
   function failure(code: string, status = 400): Response {
     console.log(JSON.stringify({ event: "agent_failure", reason: code }));
@@ -252,7 +263,7 @@ export function createAgentHandler(config: AgentConfig) {
   function token(account: string, apiKey: string, grant: "trial" | "full", expires: number): Response {
     console.log(JSON.stringify({ event: "agent_access_issued", account, scope: scope(grant) }));
     return reply({ access_token: apiKey, token_type: "Bearer", expires_in: Math.max(0, Math.floor((expires - Date.now()) / 1000)),
-      scope: scope(grant), account_id: account, api_url: product.apiUrl,
+      scope: scope(grant), account_id: account, api_url: product.apiUrl, ...(mcpUrl ? { mcp_url: mcpUrl } : {}),
       api_key_delivery: `The access token is ${product.name}'s API key; use Authorization: Bearer.` });
   }
 
@@ -349,8 +360,11 @@ export function createAgentHandler(config: AgentConfig) {
       }
       if (path === "/.well-known/jwks.json") return reply(config.signing.jwks as unknown as Json);
       if (path === "/.well-known/oauth-authorization-server") {
-        return reply({ issuer, token_endpoint: `${issuer}/oauth2/token`, revocation_endpoint: `${issuer}/oauth2/revoke`,
-          jwks_uri: `${issuer}/.well-known/jwks.json`, grant_types_supported: [JWT_GRANT, CLAIM_GRANT], scopes_supported: [scope("trial"), scope("full")],
+        const own = config.authorizationServer?.metadata ?? {};
+        const list = (value: Json | undefined) => (Array.isArray(value) ? value : []);
+        return reply({ ...own, issuer, token_endpoint: `${issuer}/oauth2/token`, revocation_endpoint: `${issuer}/oauth2/revoke`,
+          jwks_uri: `${issuer}/.well-known/jwks.json`, grant_types_supported: [...list(own.grant_types_supported), JWT_GRANT, CLAIM_GRANT],
+          scopes_supported: [...list(own.scopes_supported), scope("trial"), scope("full")],
           agent_auth: { skill: `${issuer}/auth.md`, identity_endpoint: `${issuer}/agent/identity`, claim_endpoint: `${issuer}/agent/identity/claim`,
             events_endpoint: `${issuer}/agent/events`, events_supported: [REVOKED_EVENT], identity_types_supported: ["anonymous", "service_auth", "identity_assertion"],
             identity_assertion: { assertion_types_supported: [ID_JAG] },
@@ -390,6 +404,7 @@ export function createAgentHandler(config: AgentConfig) {
         const outcome = await apply({ type: "resume", account: claim.account, claimHash: await sha256(claim.secret) });
         return token(claim.account, await keyFor(claim.account, "full"), "full", outcome.expires as number);
       }
+      if (config.authorizationServer) return config.authorizationServer.token(data, request);
       return failure("unsupported_grant_type");
     }
     if (path === "/oauth2/revoke") {
@@ -410,13 +425,15 @@ export function createAgentHandler(config: AgentConfig) {
     return failure("not_found", 404);
   }
 
-  const PATHS = ["/agent/", "/oauth2/", "/.well-known/oauth-", "/.well-known/jwks.json", "/auth.md", "/claim"];
+  // Exact paths outside /agent/, so your own OAuth server and MCP metadata can share the origin.
+  const PATHS = ["/agent/", "/oauth2/token", "/oauth2/revoke", "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-authorization-server", "/.well-known/jwks.json", "/auth.md", "/claim"];
 
   return {
-    /** Answer an auth.md request, or return null when the path is not one of the agent endpoints. */
+    /** Answer an auth.md request, or return null when the path is not one of the agent endpoints (yours to serve). */
     async handle(request: Request): Promise<Response | null> {
       const url = new URL(request.url), path = url.pathname;
-      if (!PATHS.some((prefix) => path === prefix || path.startsWith(prefix))) return null;
+      if (!PATHS.some((known) => path === known || (known.endsWith("/") && path.startsWith(known)))) return null;
       if (url.origin !== issuer) return failure("not_enabled", 404);
       if (path === "/claim") {
         const account = url.searchParams.get("registration_id") ?? "";

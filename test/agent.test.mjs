@@ -242,6 +242,32 @@ test('discovery, consent redirect, operator view and the browser origin', async 
   assert.equal((await v.agent.handle(new Request('https://elsewhere.example/auth.md'))).status, 404);
 });
 
+test('an MCP product with its own OAuth server on the same origin', async () => {
+  const seen = [];
+  const v = await setup({
+    product: { name: 'Vendor', about: 'Vendor does one thing.', apiUrl: `${ORIGIN}/api`, mcpUrl: `${ORIGIN}/mcp`, usage: 'Call the tools.',
+      scopes: { trial: 'thing:trial', full: 'thing:use' } },
+    authorizationServer: {
+      metadata: { authorization_endpoint: `${ORIGIN}/oauth2/authorize`, grant_types_supported: ['authorization_code'], issuer: 'https://ignored.example' },
+      async token(fields) { seen.push(fields.grant_type); return Response.json({ access_token: 'own', token_type: 'Bearer' }); },
+    },
+  });
+  const meta = await json(await v.agent.handle(new Request(`${ORIGIN}/.well-known/oauth-authorization-server`)));
+  assert.equal(meta.issuer, ORIGIN);
+  assert.equal(meta.authorization_endpoint, `${ORIGIN}/oauth2/authorize`);
+  assert.deepEqual(meta.grant_types_supported, ['authorization_code', JWT_GRANT, CLAIM_GRANT]);
+  // The vendor's own routes are not the SDK's.
+  for (const path of ['/oauth2/authorize', '/oauth2/register', '/.well-known/oauth-protected-resource/mcp']) {
+    assert.equal(await v.agent.handle(new Request(`${ORIGIN}${path}`)), null, path);
+  }
+  assert.equal((await json(await v.post('/oauth2/token', { grant_type: 'authorization_code', code: 'c' }))).access_token, 'own');
+  assert.deepEqual(seen, ['authorization_code']);
+  // Agent grants stay the SDK's, and name the MCP.
+  const trial = await json(await exchange(v, (await register(v)).identity_assertion));
+  assert.equal(trial.mcp_url, `${ORIGIN}/mcp`);
+  assert.ok((await (await v.agent.handle(new Request(`${ORIGIN}/auth.md`))).text()).includes(`connect to \`${ORIGIN}/mcp\``));
+});
+
 test('a claim during a trial exchange never hands the trial a full key', async () => {
   const v = await setup();
   const r = await register(v), buyer = buyerId();
