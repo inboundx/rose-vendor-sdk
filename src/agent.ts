@@ -361,7 +361,7 @@ export function createAgentHandler(config: AgentConfig) {
       if (path === "/.well-known/jwks.json") return reply(config.signing.jwks as unknown as Json);
       if (path === "/.well-known/oauth-authorization-server") {
         const own = config.authorizationServer?.metadata ?? {};
-        const list = (value: Json | undefined) => (Array.isArray(value) ? value : []);
+        const list = (value: Json | undefined) => (Array.isArray(value) ? value.filter((item) => item !== scope("trial") && item !== scope("full")) : []);
         return reply({ ...own, issuer, token_endpoint: `${issuer}/oauth2/token`, revocation_endpoint: `${issuer}/oauth2/revoke`,
           jwks_uri: `${issuer}/.well-known/jwks.json`, grant_types_supported: [...list(own.grant_types_supported), JWT_GRANT, CLAIM_GRANT],
           scopes_supported: [...list(own.scopes_supported), scope("trial"), scope("full")],

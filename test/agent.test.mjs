@@ -248,7 +248,8 @@ test('an MCP product with its own OAuth server on the same origin', async () => 
     product: { name: 'Vendor', about: 'Vendor does one thing.', apiUrl: `${ORIGIN}/api`, mcpUrl: `${ORIGIN}/mcp`, usage: 'Call the tools.',
       scopes: { trial: 'thing:trial', full: 'thing:use' } },
     authorizationServer: {
-      metadata: { authorization_endpoint: `${ORIGIN}/oauth2/authorize`, grant_types_supported: ['authorization_code'], issuer: 'https://ignored.example' },
+      metadata: { authorization_endpoint: `${ORIGIN}/oauth2/authorize`, grant_types_supported: ['authorization_code'], scopes_supported: ['thing:use'],
+        issuer: 'https://ignored.example' },
       async token(fields) { seen.push(fields.grant_type); return Response.json({ access_token: 'own', token_type: 'Bearer' }); },
     },
   });
@@ -256,6 +257,7 @@ test('an MCP product with its own OAuth server on the same origin', async () => 
   assert.equal(meta.issuer, ORIGIN);
   assert.equal(meta.authorization_endpoint, `${ORIGIN}/oauth2/authorize`);
   assert.deepEqual(meta.grant_types_supported, ['authorization_code', JWT_GRANT, CLAIM_GRANT]);
+  assert.deepEqual(meta.scopes_supported, ['thing:trial', 'thing:use']);
   // The vendor's own routes are not the SDK's.
   for (const path of ['/oauth2/authorize', '/oauth2/register', '/.well-known/oauth-protected-resource/mcp']) {
     assert.equal(await v.agent.handle(new Request(`${ORIGIN}${path}`)), null, path);
