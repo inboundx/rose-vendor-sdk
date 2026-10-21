@@ -78,7 +78,7 @@ Use Node.js 22 or later with ESM, or a Web Crypto-capable server runtime. Instal
 tag in your server project; npm builds it on install:
 
 ```bash
-npm install github:inboundx/rose-vendor-sdk#v0.3.0
+npm install github:inboundx/rose-vendor-sdk#v0.4.0
 ```
 
 The package includes compiled JavaScript, TypeScript declarations and an integration
@@ -92,7 +92,7 @@ repository, and replace the bracketed parts:
 ```text
 Connect this product to Rose for Agents with the Rose vendor SDK.
 
-1. Install it in the server project: npm install github:inboundx/rose-vendor-sdk#v0.3.0
+1. Install it in the server project: npm install github:inboundx/rose-vendor-sdk#v0.4.0
    Then read node_modules/@userose/vendor-sdk/README.md in full. It is the contract; follow
    it over your own assumptions.
 2. Find how this server routes HTTP requests, how it stores accounts, and how it runs the
@@ -357,10 +357,10 @@ absolute output directory as the first argument.
 Apache License 2.0. See [LICENSE](LICENSE).
 
 
-### Anonymous trial protection (unreleased)
+### Anonymous trial protection (v0.4.0)
 
-Set `trialProtection: "rose"` on `createAgentHandler` to use the **Anonymous trial protection**
-setting in Config Studio → Rose for Agents. It reads the policy from the configured identity
+Set `trialProtection: "rose"` on `createAgentHandler` to use the **Proof of work**
+setting in Config Studio → Rose for Agents → Agent access → Anonymous agents. It reads the policy from the configured identity
 broker and validates the vendor audience and environment. An unavailable or invalid policy
 fails anonymous registrations closed with 503. Verified Rose requests remain independent of
 this lookup. Omitting the option, or `"off"`, preserves the existing anonymous signup behavior.
