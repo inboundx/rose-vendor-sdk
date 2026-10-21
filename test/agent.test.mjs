@@ -311,3 +311,20 @@ test('the API\'s 401 points an agent with no key to auth.md; other answers pass 
   const ok = Response.json({ valid: true });
   assert.equal(await agent.challenge(ok), ok);
 });
+
+test('a 401 body the challenge cannot extend keeps its exact bytes and headers', async () => {
+  const { agent } = await setup();
+  const gzipped = new Uint8Array(await new Response(new Blob(['{"detail":"no key"}']).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+  const encoded = await agent.challenge(new Response(gzipped, { status: 401, statusText: 'Unauthorized',
+    headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Content-Length': String(gzipped.length) } }));
+  assert.equal(encoded.statusText, 'Unauthorized');
+  assert.equal(encoded.headers.get('Content-Length'), String(gzipped.length));
+  assert.deepEqual(new Uint8Array(await encoded.arrayBuffer()), gzipped);
+  assert.ok(encoded.headers.get('WWW-Authenticate').startsWith('Bearer resource_metadata='));
+  const latin1 = new Uint8Array([0x6e, 0x6f, 0x20, 0xe9]);
+  const invalid = await agent.challenge(new Response(latin1, { status: 401, headers: { 'Content-Type': 'application/json' } }));
+  assert.deepEqual(new Uint8Array(await invalid.arrayBuffer()), latin1);
+  const empty = await agent.challenge(new Response(null, { status: 401 }));
+  assert.equal(empty.headers.get('Content-Type'), null);
+  assert.equal(await empty.text(), '');
+});

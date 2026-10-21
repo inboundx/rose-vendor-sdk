@@ -290,10 +290,10 @@ const store: AgentStore = {
   }),
 };
 const agentAccess = createAgentHandler({ ...roseAgentConfiguration, accounts: yourAccounts, store });
-// Answer agent requests first; null means the request is not one of them.
-const answer = await agentAccess.handle(incomingRequest);
-// Your API's own answer: a 401 gains the challenge that leads an agent with no key to auth.md.
-const apiAnswer = await agentAccess.challenge(await yourApi(incomingRequest));
+// Answer agent requests first; null means the request is not one of them, so your API answers,
+// and its 401 gains the challenge that leads an agent with no key to auth.md.
+const answer = await agentAccess.handle(incomingRequest)
+  ?? await agentAccess.challenge(await yourApi(incomingRequest));
 ```
 
 Wrap your API's responses with `challenge`. An agent that calls your API without a key and gets

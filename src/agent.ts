@@ -459,12 +459,15 @@ export function createAgentHandler(config: AgentConfig) {
       if (response.status !== 401) return response;
       const headers = new Headers(response.headers);
       if (!headers.has("WWW-Authenticate")) headers.set("WWW-Authenticate", `Bearer resource_metadata="${issuer}/.well-known/oauth-protected-resource"`);
-      const text = await response.text();
+      const init = { status: 401, statusText: response.statusText, headers };
+      // Only a plain JSON body is rewritten; any other body keeps its exact bytes.
+      if (!headers.get("Content-Type")?.includes("json") || headers.has("Content-Encoding")) return new Response(response.body, init);
+      const bytes = await response.arrayBuffer();
       let body: unknown = null;
-      try { body = headers.get("Content-Type")?.includes("json") ? JSON.parse(text) : null; } catch { body = null; }
-      if (!body || typeof body !== "object" || Array.isArray(body)) return new Response(text, { status: 401, statusText: response.statusText, headers });
+      try { body = JSON.parse(new TextDecoder().decode(bytes)); } catch { body = null; }
+      if (!body || typeof body !== "object" || Array.isArray(body)) return new Response(bytes, init);
       headers.delete("Content-Length");
-      return Response.json({ ...body, agent_registration: `No API key? An AI agent can start a trial itself: ${issuer}/auth.md` }, { status: 401, headers });
+      return Response.json({ ...body, agent_registration: `No API key? An AI agent can start a trial itself: ${issuer}/auth.md` }, init);
     },
 
     /** For your signed `/r4a` handlers: the same store, so a claim and a provisioning agree. */
