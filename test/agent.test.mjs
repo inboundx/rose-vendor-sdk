@@ -298,3 +298,16 @@ test('a streamed body over the limit is refused without reading it all', async (
   assert.deepEqual(await json(response), { error: 'invalid_request' });
   assert.ok(pulled < 10, `pulled ${pulled} chunks`);
 });
+
+test('the API\'s 401 points an agent with no key to auth.md; other answers pass through', async () => {
+  const { agent } = await setup();
+  const challenged = await agent.challenge(Response.json({ detail: 'Missing API key' }, { status: 401 }));
+  assert.equal(challenged.status, 401);
+  assert.equal(challenged.headers.get('WWW-Authenticate'), `Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource"`);
+  assert.deepEqual(await challenged.json(), { detail: 'Missing API key', agent_registration: `No API key? An AI agent can start a trial itself: ${ORIGIN}/auth.md` });
+  const text = await agent.challenge(new Response('no key', { status: 401, headers: { 'WWW-Authenticate': 'Bearer realm="api"' } }));
+  assert.equal(text.headers.get('WWW-Authenticate'), 'Bearer realm="api"');
+  assert.equal(await text.text(), 'no key');
+  const ok = Response.json({ valid: true });
+  assert.equal(await agent.challenge(ok), ok);
+});
