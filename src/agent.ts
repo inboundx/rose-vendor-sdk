@@ -194,6 +194,7 @@ export function createAccountDirectory(store: AgentStore, accounts: Pick<AgentAc
     const current = await record(account);
     if (!current) return "unknown";
     if (current.owner !== ownerOf(buyer)) return "not_owner";
+    if (current.trial?.revoked) return "restricted";
     const agent = current.agent;
     return agent && (agent.status !== "claimed" || agent.credentialExpires <= Date.now()) ? "restricted" : "ok";
   }
@@ -208,7 +209,11 @@ export function createAccountDirectory(store: AgentStore, accounts: Pick<AgentAc
     /** Give `account` (one you created for this buyer) to the buyer, unless it already has one: that one is returned. */
     async provision(buyer: Buyer, account: string): Promise<{ account: string } | "not_owner"> {
       const outcome = await store.apply({ type: "provision", owner: ownerOf(buyer), account });
-      return outcome.error ? "not_owner" : { account: outcome.account as string };
+      if (outcome.error) return "not_owner";
+      const mapped = outcome.account as string;
+      // A buyer who tried the product through an accepted issuer keeps that account as their own.
+      if ((await record(mapped))?.trial) await store.apply({ type: "trial_upgrade", owner: ownerOf(buyer), account: mapped });
+      return { account: mapped };
     },
     async owns(buyer: Buyer, account: string): Promise<boolean> {
       return (await record(account))?.owner === ownerOf(buyer);
@@ -283,7 +288,7 @@ export function createAgentHandler(config: AgentConfig) {
   }
 
   /** The person an accepted issuer vouches for, or null when the token is not from one (your own assertions go on to `ownAssertion`). */
-  async function issuerPerson(raw: unknown): Promise<{ issuer: string; subject: string; email: string } | null> {
+  async function issuerPerson(raw: unknown): Promise<{ issuer: string; subject: string; email: string; issuedAt: number } | null> {
     if (!issuers.size || typeof raw !== "string" || raw.length > MAX_BODY_BYTES) return null;
     let iss: unknown;
     try { iss = decodeJwt(raw).iss; } catch { return null; }
@@ -295,11 +300,11 @@ export function createAgentHandler(config: AgentConfig) {
     // An environment claim, when the issuer sends one (Rose ID does), must be this one.
     if (typeof p.sub !== "string" || !p.sub || typeof p.email !== "string" || !EMAIL.test(p.email) || p.email_verified !== true ||
         (p.environment !== undefined && p.environment !== config.environment)) throw new AgentError("invalid_grant");
-    return { issuer: iss, subject: p.sub, email: p.email };
+    return { issuer: iss, subject: p.sub, email: p.email, issuedAt: p.iat as number };
   }
 
   /** One trial account per person, found again by issuer and subject; shortcut: a lost creation race leaves an unused account at your product. */
-  async function issuerTrial(person: { issuer: string; subject: string; email: string }): Promise<Response> {
+  async function issuerTrial(person: { issuer: string; subject: string; email: string; issuedAt: number }): Promise<Response> {
     // Rose ID's buyer owns the same record as in Handover, so Rose's revocation events reach this trial too.
     const rose = person.issuer === config.rose.issuer;
     if (rose && !BUYER_ID.test(person.subject)) throw new AgentError("invalid_grant");
@@ -313,7 +318,7 @@ export function createAgentHandler(config: AgentConfig) {
         throw new AgentError("temporarily_unavailable", 503);
       }
       if (!ACCOUNT_ID.test(created)) throw new Error("AgentAccounts.create returned an invalid account id");
-      account = (await apply({ type: "issuer_trial", owner, account: created, expires: Date.now() + ISSUER_TRIAL_SECONDS * 1000, maxUses: config.trialLimit })).account as string;
+      account = (await apply({ type: "issuer_trial", owner, account: created, expires: Date.now() + ISSUER_TRIAL_SECONDS * 1000, maxUses: config.trialLimit, issuedAt: person.issuedAt })).account as string;
     }
     // An account that is not a trial (claimed or provisioned for this person) has its own credentials.
     const trial = (await record(account))?.trial;

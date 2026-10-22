@@ -41,7 +41,7 @@ export interface AccountRecord {
   key?: AgentKey;
   staleKeys?: string[]; // keys to revoke at your product
   claimedBy?: string; // email of the claim to record at your product; no key until then
-  trial?: { expires: number; maxUses: number }; // an account started by a trusted issuer: a trial key until `expires`, never a full one
+  trial?: { expires: number; maxUses: number; revoked?: boolean }; // started by a trusted issuer: a trial key until `expires`, until a signed provision upgrades it
 }
 
 /** `buyer:<environment>:<buyer id>`: the buyer's one account, used proofs and revocation cutoff. */
@@ -64,7 +64,8 @@ export type AgentChange =
   | { type: "revoke_owner"; owner: string; account: string | null; eventId: string; eventExpires: number; issuedAt: number }
   | { type: "revocation_done"; owner: string; eventId: string; eventExpires: number }
   | { type: "provision"; owner: string; account: string }
-  | { type: "issuer_trial"; owner: string; account: string; expires: number; maxUses: number }
+  | { type: "issuer_trial"; owner: string; account: string; expires: number; maxUses: number; issuedAt: number }
+  | { type: "trial_upgrade"; owner: string; account: string }
   | { type: "set_key"; account: string; key: AgentKey; scope: "trial" | "full" }
   | { type: "claim_recorded"; account: string; email: string }
   | { type: "key_revoked"; account: string; keyId: string };
@@ -128,7 +129,7 @@ function retireKey(record: AccountRecord): void {
 
 /** End an issuer trial for good: its key goes stale and no assertion can bring it back. */
 function endTrial(record: AccountRecord): void {
-  if (record.trial) record.trial.expires = 0;
+  if (record.trial) Object.assign(record.trial, { expires: 0, revoked: true });
   retireKey(record);
 }
 
@@ -294,11 +295,23 @@ export function applyAgentChange(change: AgentChange, records: Record<string, Js
       // One trial per person: a later request finds the same account, expired or not.
       const buyer = load<BuyerRecord>(buyerKey(change.owner)) ?? { seen: {}, revocations: {} };
       if (buyer.account) return done({ account: buyer.account, created: false });
+      // A token issued before an acknowledged revocation cannot start a trial.
+      if (buyer.revokedAt !== undefined && change.issuedAt <= buyer.revokedAt) return fail("fresh_authentication_required");
       if (records[accountKey(change.account)] !== undefined) return fail("account_conflict");
       buyer.account = change.account;
       save(accountKey(change.account), { owner: change.owner, trial: { expires: change.expires, maxUses: change.maxUses } });
       save(buyerKey(change.owner), buyer);
       return done({ account: change.account, created: true });
+    }
+
+    case "trial_upgrade": {
+      // The signed contract provisions the buyer's account: a trial that was not revoked becomes that account.
+      const record = load<AccountRecord>(accountKey(change.account));
+      if (!record || record.owner !== change.owner || record.agent || !record.trial || record.trial.revoked) return done({ upgraded: false });
+      delete record.trial;
+      retireKey(record); // the trial's key stops working; the account's full key comes with its checkout
+      save(accountKey(change.account), record);
+      return done({ upgraded: true });
     }
 
     case "set_key": {

@@ -654,3 +654,41 @@ test('acceptedIssuers cannot hold the vendor\'s own origin, whose assertions tak
   await assert.rejects(authProvider({ acceptedIssuers: [{ issuer: ORIGIN, jwks: { keys: [idpJwk] } }] }), /own origin/);
   await assert.rejects(authProvider({ acceptedIssuers: [{ issuer: `${ORIGIN}/`, jwks: { keys: [idpJwk] } }] }), /own origin/);
 });
+
+test('auth-provider: a revocation that arrives first blocks tokens issued before it', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId();
+  const now = Math.floor(Date.now() / 1000);
+  const stale = await roseIdentity(buyer, { iat: now - 5 });
+  const event = await proof({ registration_id: 'none', claim: { user_code: '000000' } }, buyer, { iat: now, exp: now + 300, events: { [REVOKED]: {} } }, 'secevent+jwt');
+  assert.equal((await v.post('/agent/events', event)).status, 202);
+  const refused = await exchange(v, stale);
+  assert.equal(refused.status, 400);
+  assert.equal(v.accounts.keys.size, 0);
+  assert.equal(v.store.data.get(`buyer:test:${buyer}`)?.account, undefined);
+});
+
+test('auth-provider: a buyer who tried the product provisions that same account, and the trial key ends', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId(), who = { buyerId: buyer, environment: 'test' };
+  const trial = await json(await exchange(v, await roseIdentity(buyer)));
+  assert.equal(await v.agent.contract.access(who, trial.account_id), 'restricted'); // a trial is not the account's full access yet
+  const provisioned = await v.agent.contract.provision(who, await v.accounts.create());
+  assert.deepEqual(provisioned, { account: trial.account_id });
+  const full = await v.agent.contract.access(who, trial.account_id);
+  assert.ok(full.apiKey && full.apiKey !== trial.access_token);
+  assert.equal(v.accounts.call(trial.access_token), 401);
+  assert.equal(v.accounts.call(full.apiKey), 200);
+  assert.equal((await exchange(v, await roseIdentity(buyer))).status, 400); // no second trial on a real account
+});
+
+test('auth-provider: a revoked trial is restricted at the signed door and is not upgraded by provisioning', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId(), who = { buyerId: buyer, environment: 'test' };
+  const trial = await json(await exchange(v, await roseIdentity(buyer)));
+  assert.equal((await v.post('/oauth2/revoke', { token: trial.access_token })).status, 200);
+  assert.equal(await v.agent.contract.check(who, trial.account_id), 'restricted');
+  await v.agent.contract.provision(who, await v.accounts.create());
+  assert.equal(await v.agent.contract.access(who, trial.account_id), 'restricted');
+  assert.equal(v.accounts.keys.size, 0);
+});
