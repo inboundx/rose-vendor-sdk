@@ -126,6 +126,12 @@ function retireKey(record: AccountRecord): void {
   delete record.key;
 }
 
+/** End an issuer trial for good: its key goes stale and no assertion can bring it back. */
+function endTrial(record: AccountRecord): void {
+  if (record.trial) record.trial.expires = 0;
+  retireKey(record);
+}
+
 function revoke(record: AccountRecord, agent: AgentState, issuedAt: number): void {
   agent.status = "revoked";
   agent.revokedAt = Math.max(agent.revokedAt ?? 0, issuedAt);
@@ -235,8 +241,9 @@ export function applyAgentChange(change: AgentChange, records: Record<string, Js
 
     case "revoke_token": {
       const record = load<AccountRecord>(accountKey(change.account)), agent = record?.agent;
-      if (!record || !agent || !record.key || !equal(record.key.apiKey, change.apiKey)) return done({ revoked: false });
-      revoke(record, agent, Math.floor(now / 1000));
+      if (!record || !record.key || !equal(record.key.apiKey, change.apiKey) || (!agent && !record.trial)) return done({ revoked: false });
+      if (agent) revoke(record, agent, Math.floor(now / 1000));
+      else endTrial(record);
       save(accountKey(change.account), record);
       return done({ revoked: true });
     }
@@ -256,6 +263,9 @@ export function applyAgentChange(change: AgentChange, records: Record<string, Js
         } else {
           revoke(record, agent, change.issuedAt);
         }
+        save(accountKey(change.account as string), record);
+      } else if (record && !agent && record.trial && record.owner === change.owner) {
+        endTrial(record);
         save(accountKey(change.account as string), record);
       }
       return done();

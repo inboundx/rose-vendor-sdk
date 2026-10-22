@@ -6,7 +6,7 @@
  */
 import { createLocalJWKSet, decodeJwt, importPKCS8, jwtVerify, SignJWT, type JSONWebKeySet } from "jose";
 import { createHandoverVerifier, REVOKED_EVENT } from "./handover.js";
-import { type Buyer, EMAIL, type Environment, type Json, origin as httpsOrigin, readBytes, trustedUrl } from "./http.js";
+import { type Buyer, BUYER_ID, EMAIL, type Environment, type Json, origin as httpsOrigin, readBytes, trustedUrl } from "./http.js";
 import { type AccountRecord, accountKey, type AgentChange, type AgentKey, type AgentOutcome, type AgentState,
   type BuyerRecord, buyerKey, CLAIM_SECONDS, keyGrant } from "./agent-state.js";
 import { agentSkill } from "./agent-skill.js";
@@ -238,6 +238,8 @@ export function createAgentHandler(config: AgentConfig) {
   if ((mode === "auth-provider") !== Boolean(config.acceptedIssuers?.length)) throw new Error("acceptedIssuers is required by, and only allowed with, mode auth-provider");
   const issuers = new Map((config.acceptedIssuers ?? []).map((accepted) => {
     if (!accepted.issuer || !accepted.jwks.keys.length || accepted.jwks.keys.some((key) => "d" in key)) throw new Error("acceptedIssuers must hold an issuer and its public keys");
+    // Your own assertions (iss = your origin) take the exchange below; an identity provider cannot share that issuer.
+    if (accepted.issuer.replace(/\/$/, "") === issuer) throw new Error("acceptedIssuers cannot hold your own origin");
     return [accepted.issuer, createLocalJWKSet(structuredClone(accepted.jwks))] as const;
   }));
   const handover = createHandoverVerifier({ ...config.rose, audience: issuer, environment: config.environment });
@@ -287,7 +289,9 @@ export function createAgentHandler(config: AgentConfig) {
     try { iss = decodeJwt(raw).iss; } catch { return null; }
     const keys = typeof iss === "string" ? issuers.get(iss) : undefined;
     if (typeof iss !== "string" || !keys) return null;
-    const { payload: p } = await jwtVerify(raw, keys, { issuer: iss, audience: issuer, algorithms: ["ES256", "RS256"], requiredClaims: ["sub", "exp", "iat"] });
+    const { payload: p, protectedHeader } = await jwtVerify(raw, keys, { issuer: iss, audience: issuer, algorithms: ["ES256", "RS256"], requiredClaims: ["sub", "exp", "iat"] });
+    // Rose's claim proofs (ID-JAG) and revocation events are signed by the same key but belong to other protocols.
+    if (protectedHeader.typ === ASSERTION_TYP || protectedHeader.typ === "secevent+jwt") throw new AgentError("invalid_grant");
     // An environment claim, when the issuer sends one (Rose ID does), must be this one.
     if (typeof p.sub !== "string" || !p.sub || typeof p.email !== "string" || !EMAIL.test(p.email) || p.email_verified !== true ||
         (p.environment !== undefined && p.environment !== config.environment)) throw new AgentError("invalid_grant");
@@ -296,7 +300,10 @@ export function createAgentHandler(config: AgentConfig) {
 
   /** One trial account per person, found again by issuer and subject; shortcut: a lost creation race leaves an unused account at your product. */
   async function issuerTrial(person: { issuer: string; subject: string; email: string }): Promise<Response> {
-    const owner = `${config.environment}:issuer:${await sha256(`${person.issuer}\n${person.subject}`)}`;
+    // Rose ID's buyer owns the same record as in Handover, so Rose's revocation events reach this trial too.
+    const rose = person.issuer === config.rose.issuer;
+    if (rose && !BUYER_ID.test(person.subject)) throw new AgentError("invalid_grant");
+    const owner = rose ? `${config.environment}:${person.subject}` : `${config.environment}:issuer:${await sha256(`${person.issuer}\n${person.subject}`)}`;
     let account = ((await store.read(buyerKey(owner))) as BuyerRecord | undefined)?.account;
     if (!account) {
       let created: string;
@@ -308,8 +315,11 @@ export function createAgentHandler(config: AgentConfig) {
       if (!ACCOUNT_ID.test(created)) throw new Error("AgentAccounts.create returned an invalid account id");
       account = (await apply({ type: "issuer_trial", owner, account: created, expires: Date.now() + ISSUER_TRIAL_SECONDS * 1000, maxUses: config.trialLimit })).account as string;
     }
+    // An account that is not a trial (claimed or provisioned for this person) has its own credentials.
+    const trial = (await record(account))?.trial;
+    if (!trial) throw new AgentError("invalid_grant");
     const apiKey = await keyFor(account, "trial");
-    return token(account, apiKey, "trial", (await record(account))?.trial?.expires ?? 0);
+    return token(account, apiKey, "trial", trial.expires);
   }
 
   /** The agent's key; a failure at your product is worth a retry, and spends no grant. */

@@ -314,8 +314,10 @@ and `llms.txt` as well: in Rose's tests, that link is what agents followed.
   `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer` and gets a trial key for its account.
   The token needs a verified email and your origin as audience. One person (issuer and subject)
   gets one account and one trial, for an hour and `trialLimit` calls: `issueKey` receives both
-  limits, enforce them. `create` receives the person, to record with the account. The SDK refuses
-  to start when `auth-provider` has no `acceptedIssuers`, or the reverse.
+  limits, enforce them. `create` receives the person, to record with the account. The person can
+  revoke the key at `/oauth2/revoke`, and Rose's revocation events end the trial of a Rose ID
+  buyer; either way the trial does not come back. The SDK refuses to start when `auth-provider`
+  has no `acceptedIssuers`, or the reverse, or when an accepted issuer is your own origin.
 - **`catalogue`**: Rose runs the trial with its own key. Not available yet; the SDK refuses it.
 
 #### When your product is an MCP server

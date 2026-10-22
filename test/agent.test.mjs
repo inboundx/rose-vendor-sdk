@@ -600,3 +600,57 @@ test('auth-provider: a failing product answers 503 and the retry succeeds', asyn
   v.accounts.failIssue = false;
   assert.equal((await exchange(v, await identity())).status, 200);
 });
+
+/** An identity token signed by Rose's broker, the way Rose's try_product sends it. */
+async function roseIdentity(buyer, claims = {}, typ = 'JWT') {
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({ iss: 'https://identity.example', sub: buyer, aud: ORIGIN, jti: crypto.randomUUID(), iat: now, exp: now + 300,
+    email: 'person@example.com', email_verified: true, environment: 'test', ...claims })
+    .setProtectedHeader({ typ, alg: 'ES256', kid: 'broker' }).sign(broker.privateKey);
+}
+const roseIssuer = { issuer: 'https://identity.example', jwks: { keys: [brokerJwk] } };
+
+test('auth-provider: the person can revoke their own trial key, and no token brings it back', async () => {
+  const v = await authProvider();
+  const first = await json(await exchange(v, await identity()));
+  assert.equal(v.accounts.call(first.access_token), 200);
+  assert.equal((await v.post('/oauth2/revoke', { token: first.access_token })).status, 200);
+  assert.equal(v.accounts.call(first.access_token), 401);
+  const again = await exchange(v, await identity());
+  assert.equal(again.status, 400);
+  assert.equal(v.accounts.keys.size, 0);
+});
+
+test('auth-provider: Rose\'s revocation event ends the trial of a Rose ID buyer', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId();
+  const first = await json(await exchange(v, await roseIdentity(buyer)));
+  assert.equal(v.accounts.call(first.access_token), 200);
+  const now = Math.floor(Date.now() / 1000);
+  const event = await proof({ registration_id: 'none', claim: { user_code: '000000' } }, buyer, { iat: now, exp: now + 300, events: { [REVOKED]: {} } }, 'secevent+jwt');
+  assert.equal((await v.post('/agent/events', event)).status, 202);
+  assert.equal(v.accounts.call(first.access_token), 401);
+  assert.equal((await exchange(v, await roseIdentity(buyer))).status, 400);
+});
+
+test('auth-provider: Rose\'s claim proofs and non-buyer subjects are not identity tokens', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  assert.equal((await exchange(v, await roseIdentity(buyerId(), {}, 'oauth-id-jag+jwt'))).status, 400);
+  assert.equal((await exchange(v, await roseIdentity(buyerId(), {}, 'secevent+jwt'))).status, 400);
+  assert.equal((await exchange(v, await roseIdentity('not-a-buyer'))).status, 400);
+  assert.equal(v.accounts.keys.size, 0);
+});
+
+test('auth-provider: an account that is not a trial is not handed a trial key', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId();
+  const account = await v.accounts.create();
+  await v.agent.contract.provision({ buyerId: buyer, environment: 'test' }, account);
+  assert.equal((await exchange(v, await roseIdentity(buyer))).status, 400);
+  assert.equal(v.accounts.keys.size, 0);
+});
+
+test('acceptedIssuers cannot hold the vendor\'s own origin, whose assertions take the existing exchange', async () => {
+  await assert.rejects(authProvider({ acceptedIssuers: [{ issuer: ORIGIN, jwks: { keys: [idpJwk] } }] }), /own origin/);
+  await assert.rejects(authProvider({ acceptedIssuers: [{ issuer: `${ORIGIN}/`, jwks: { keys: [idpJwk] } }] }), /own origin/);
+});
