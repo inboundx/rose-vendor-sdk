@@ -41,6 +41,7 @@ export interface AccountRecord {
   key?: AgentKey;
   staleKeys?: string[]; // keys to revoke at your product
   claimedBy?: string; // email of the claim to record at your product; no key until then
+  trial?: { expires: number; maxUses: number }; // an account started by a trusted issuer: a trial key until `expires`, never a full one
 }
 
 /** `buyer:<environment>:<buyer id>`: the buyer's one account, used proofs and revocation cutoff. */
@@ -63,6 +64,7 @@ export type AgentChange =
   | { type: "revoke_owner"; owner: string; account: string | null; eventId: string; eventExpires: number; issuedAt: number }
   | { type: "revocation_done"; owner: string; eventId: string; eventExpires: number }
   | { type: "provision"; owner: string; account: string }
+  | { type: "issuer_trial"; owner: string; account: string; expires: number; maxUses: number }
   | { type: "set_key"; account: string; key: AgentKey; scope: "trial" | "full" }
   | { type: "claim_recorded"; account: string; email: string }
   | { type: "key_revoked"; account: string; keyId: string };
@@ -81,6 +83,7 @@ export function agentChangeKeys(change: AgentChange): string[] {
     case "claim":
       return [accountKey(change.account), buyerKey(change.owner)];
     case "provision":
+    case "issuer_trial":
       return [accountKey(change.account), buyerKey(change.owner)];
     case "revoke_owner":
       return change.account ? [buyerKey(change.owner), accountKey(change.account)] : [buyerKey(change.owner)];
@@ -95,7 +98,10 @@ export function agentChangeKeys(change: AgentChange): string[] {
 export function keyGrant(record: AccountRecord | undefined, now: number): { scope: "trial" | "full"; expiresAt?: number; maxUses?: number } | null {
   if ((!record?.owner && !record?.agent) || record.claimedBy) return null;
   const agent = record.agent;
-  if (!agent) return { scope: "full" };
+  if (!agent) {
+    if (!record.trial) return { scope: "full" };
+    return record.trial.expires > now ? { scope: "trial", expiresAt: record.trial.expires, maxUses: record.trial.maxUses } : null;
+  }
   if (agent.status === "claimed") return agent.credentialExpires > now ? { scope: "full", expiresAt: agent.credentialExpires } : null;
   if (agent.status === "pending" && agent.kind === "anonymous" && agent.expires > now) {
     return { scope: "trial", expiresAt: agent.expires, maxUses: agent.trialLimit };
@@ -270,6 +276,17 @@ export function applyAgentChange(change: AgentChange, records: Record<string, Js
       record.owner = change.owner;
       buyer.account = change.account;
       save(accountKey(change.account), record);
+      save(buyerKey(change.owner), buyer);
+      return done({ account: change.account, created: true });
+    }
+
+    case "issuer_trial": {
+      // One trial per person: a later request finds the same account, expired or not.
+      const buyer = load<BuyerRecord>(buyerKey(change.owner)) ?? { seen: {}, revocations: {} };
+      if (buyer.account) return done({ account: buyer.account, created: false });
+      if (records[accountKey(change.account)] !== undefined) return fail("account_conflict");
+      buyer.account = change.account;
+      save(accountKey(change.account), { owner: change.owner, trial: { expires: change.expires, maxUses: change.maxUses } });
       save(buyerKey(change.owner), buyer);
       return done({ account: change.account, created: true });
     }

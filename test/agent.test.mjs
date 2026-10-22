@@ -520,3 +520,83 @@ test('proof replay shards prune expiry and never evict live proofs when full', (
   const full = Object.fromEntries(Array.from({length:1024}, (_,i)=>['ab'+(i+1).toString(16).padStart(62,'0'),now+300000]));
   assert.equal(applyAgentChange(change,{[key]:full},now).outcome.error,'proof_capacity_reached');
 });
+
+const idp = await generateKeyPair('ES256');
+const idpJwk = { ...await exportJWK(idp.publicKey), kid: 'idp' };
+const IDP = 'https://idp.example';
+const authProvider = (overrides = {}) => setup({ mode: 'auth-provider', acceptedIssuers: [{ issuer: IDP, jwks: { keys: [idpJwk] } }], ...overrides });
+
+async function identity(claims = {}, key = idp.privateKey) {
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({ iss: IDP, sub: 'user_1', aud: ORIGIN, iat: now, exp: now + 300, email: 'person@example.com', email_verified: true, ...claims })
+    .setProtectedHeader({ alg: 'ES256', kid: 'idp' }).sign(key);
+}
+
+test('mode is checked at startup; catalogue is not available yet', async () => {
+  await assert.rejects(setup({ mode: 'catalogue' }), /not available yet/);
+  await assert.rejects(setup({ mode: 'auth-provider' }), /acceptedIssuers/);
+  await assert.rejects(setup({ acceptedIssuers: [{ issuer: IDP, jwks: { keys: [idpJwk] } }] }), /acceptedIssuers/);
+  await assert.rejects(setup({ mode: 'sandbox' }), /Invalid mode/);
+  await assert.rejects(authProvider({ acceptedIssuers: [{ issuer: IDP, jwks: { keys: [{ ...idpJwk, d: 'secret' }] } }] }), /public keys/);
+});
+
+test('the mode is published in the OAuth metadata, contract by default', async () => {
+  const metadata = async (v) => (await v.agent.handle(new Request(`${ORIGIN}/.well-known/oauth-authorization-server`))).json();
+  assert.equal((await metadata(await setup())).agent_auth.trial_mode, 'contract');
+  const published = (await metadata(await authProvider())).agent_auth;
+  assert.equal(published.trial_mode, 'auth-provider');
+  assert.deepEqual(published.accepted_issuers, [IDP]);
+});
+
+test('auth-provider: a trusted issuer\'s token is exchanged for one limited trial key per person', async () => {
+  const v = await authProvider();
+  const first = await json(await exchange(v, await identity()));
+  assert.equal(first.scope, 'thing:trial');
+  assert.equal(first.account_id, 'acct_1');
+  assert.ok(first.expires_in > 3500 && first.expires_in <= 3600);
+  assert.equal(v.accounts.keys.get(first.access_token).grant.maxUses, 2);
+  assert.equal(v.accounts.call(first.access_token), 200);
+  assert.equal(v.accounts.call(first.access_token), 200);
+  assert.equal(v.accounts.call(first.access_token), 403);
+  // The same person gets the same account and key; another person gets another account.
+  const again = await json(await exchange(v, await identity()));
+  assert.deepEqual([again.account_id, again.access_token], [first.account_id, first.access_token]);
+  assert.notEqual((await json(await exchange(v, await identity({ sub: 'user_2' })))).account_id, first.account_id);
+});
+
+test('auth-provider: the trial ends for good when it expires', async () => {
+  const v = await authProvider();
+  const first = await json(await exchange(v, await identity()));
+  const record = v.store.data.get(`account:${first.account_id}`);
+  record.trial.expires = Date.now() - 1;
+  const refused = await exchange(v, await identity());
+  assert.equal(refused.status, 400);
+  assert.equal((await json(refused)).error, 'invalid_grant');
+  assert.equal(v.accounts.keys.size, 1);
+});
+
+test('auth-provider: refuses tokens that are not verified, for this origin, from a trusted issuer', async () => {
+  const v = await authProvider();
+  const stranger = await generateKeyPair('ES256');
+  for (const token of [
+    await identity({ email_verified: false }),
+    await identity({ email_verified: undefined }),
+    await identity({ email: undefined }),
+    await identity({ aud: 'https://other.example' }),
+    await identity({ environment: 'production' }),
+    await identity({ exp: Math.floor(Date.now() / 1000) - 10 }),
+    await identity({}, stranger.privateKey),
+    await identity({ iss: 'https://evil.example' }),
+    'not-a-token',
+  ]) assert.equal((await exchange(v, token)).status, 400);
+  assert.equal(v.accounts.keys.size, 0);
+  assert.equal(v.store.data.size, 0);
+});
+
+test('auth-provider: a failing product answers 503 and the retry succeeds', async () => {
+  const v = await authProvider();
+  v.accounts.failIssue = true;
+  assert.equal((await exchange(v, await identity())).status, 503);
+  v.accounts.failIssue = false;
+  assert.equal((await exchange(v, await identity())).status, 200);
+});

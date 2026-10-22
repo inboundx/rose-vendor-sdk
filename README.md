@@ -302,6 +302,22 @@ a bare `401` concludes that only a person can sign up; the challenge
 and a JSON body also gains a one-line pointer to `/auth.md`. Link `/auth.md` from your API docs
 and `llms.txt` as well: in Rose's tests, that link is what agents followed.
 
+#### How Rose trials your product (`mode`)
+
+`mode` says how a buyer's agent starts a trial. The SDK publishes it in your OAuth metadata
+(`agent_auth.trial_mode`) and Rose reads it from there.
+
+- **`contract`** (default): the signed `/trial` and the anonymous trial, as above.
+- **`auth-provider`**: set `acceptedIssuers` to the identity providers you trust, each with its
+  issuer and public keys (`{ issuer, jwks }`; update the keys when the provider rotates them). Rose
+  ID is one. An agent posts its identity token to `/oauth2/token` with
+  `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer` and gets a trial key for its account.
+  The token needs a verified email and your origin as audience. One person (issuer and subject)
+  gets one account and one trial, for an hour and `trialLimit` calls: `issueKey` receives both
+  limits, enforce them. `create` receives the person, to record with the account. The SDK refuses
+  to start when `auth-provider` has no `acceptedIssuers`, or the reverse.
+- **`catalogue`**: Rose runs the trial with its own key. Not available yet; the SDK refuses it.
+
 #### When your product is an MCP server
 
 An agent can use your MCP before anyone signs in, and keep the account once the person claims it:

@@ -4,7 +4,7 @@
  * SDK serves the endpoints and runs the lifecycle; you supply your accounts and API keys
  * (`AgentAccounts`) and a store that applies each change in one transaction (`AgentStore`).
  */
-import { createLocalJWKSet, importPKCS8, jwtVerify, SignJWT, type JSONWebKeySet } from "jose";
+import { createLocalJWKSet, decodeJwt, importPKCS8, jwtVerify, SignJWT, type JSONWebKeySet } from "jose";
 import { createHandoverVerifier, REVOKED_EVENT } from "./handover.js";
 import { type Buyer, EMAIL, type Environment, type Json, origin as httpsOrigin, readBytes, trustedUrl } from "./http.js";
 import { type AccountRecord, accountKey, type AgentChange, type AgentKey, type AgentOutcome, type AgentState,
@@ -19,6 +19,7 @@ export const CLAIM_GRANT = "urn:workos:agent-auth:grant-type:claim";
 const ASSERTION_TYP = "oauth-id-jag+jwt";
 const ID_JAG = "urn:ietf:params:oauth:token-type:id-jag";
 const MAX_BODY_BYTES = 8192;
+const ISSUER_TRIAL_SECONDS = 3600;
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CLAIM_TOKEN = /^clm_([A-Za-z0-9_-]{1,128})\.([0-9a-f]{64})$/;
 
@@ -30,8 +31,11 @@ export interface AgentStore {
 
 /** Your product's accounts and API keys, called outside the store's transactions. */
 export interface AgentAccounts {
-  /** A new account for an agent registration; an anonymous one starts on your trial plan. */
-  create(kind: AgentState["kind"]): Promise<string>;
+  /**
+   * A new account for an agent registration; an anonymous one starts on your trial plan. A trusted
+   * issuer's trial passes the person it verified, to record with the account.
+   */
+  create(kind: AgentState["kind"], person?: { issuer: string; subject: string; email: string }): Promise<string>;
   /** A key for the account. A trial key expires and allows `maxUses` calls; enforce both. */
   issueKey(accountId: string, grant: { scope: "trial" | "full"; expiresAt?: number; maxUses?: number }): Promise<AgentKey>;
   /** Stop a key at once. Revoking an unknown key is not an error. */
@@ -42,9 +46,23 @@ export interface AgentAccounts {
   accountOfKey(apiKey: string): string | null;
 }
 
+/**
+ * How a buyer's agent trials your product, published in your OAuth metadata for Rose to read.
+ * `contract`: the signed `/trial` and the anonymous trial, as before (the default).
+ * `auth-provider`: the buyer's identity token from an accepted issuer is exchanged for a trial key.
+ * `catalogue`: Rose runs the trial with its own key; not available yet.
+ */
+export type TrialMode = "contract" | "auth-provider" | "catalogue";
+
+/** An identity provider you trust, with its public keys (update them when it rotates). */
+export interface AcceptedIssuer { issuer: string; jwks: JSONWebKeySet }
+
 export interface AgentConfig {
   /** Your public origin: the auth.md issuer and the audience of Rose's tokens. */
   origin: string;
+  mode?: TrialMode;
+  /** Required by `auth-provider`, refused otherwise. A token needs a verified email and your origin as audience. */
+  acceptedIssuers?: readonly AcceptedIssuer[];
   environment: Environment;
   /** Rose's identity service, from your Handover trust configuration. */
   rose: { issuer: string; clientId: string; allowedSources: readonly string[]; jwks: JSONWebKeySet };
@@ -214,6 +232,14 @@ export function createAgentHandler(config: AgentConfig) {
   if (!["test", "production"].includes(config.environment)) throw new Error("Invalid environment");
   if (!Number.isSafeInteger(config.trialLimit) || config.trialLimit < 1 || config.trialLimit > 100) throw new Error("Invalid trialLimit");
   if (!config.signing.jwks.keys.length || config.signing.jwks.keys.some((key) => "d" in key)) throw new Error("signing.jwks must hold public keys");
+  const mode = config.mode ?? "contract";
+  if (mode === "catalogue") throw new Error("mode catalogue is not available yet");
+  if (mode !== "contract" && mode !== "auth-provider") throw new Error("Invalid mode");
+  if ((mode === "auth-provider") !== Boolean(config.acceptedIssuers?.length)) throw new Error("acceptedIssuers is required by, and only allowed with, mode auth-provider");
+  const issuers = new Map((config.acceptedIssuers ?? []).map((accepted) => {
+    if (!accepted.issuer || !accepted.jwks.keys.length || accepted.jwks.keys.some((key) => "d" in key)) throw new Error("acceptedIssuers must hold an issuer and its public keys");
+    return [accepted.issuer, createLocalJWKSet(structuredClone(accepted.jwks))] as const;
+  }));
   const handover = createHandoverVerifier({ ...config.rose, audience: issuer, environment: config.environment });
   const vendorKeys = createLocalJWKSet(structuredClone(config.signing.jwks));
   const signingKey = importPKCS8(config.signing.privateKey, "ES256");
@@ -252,6 +278,38 @@ export function createAgentHandler(config: AgentConfig) {
     if (typeof p.sub !== "string" || typeof p.jti !== "string" || p.jti.length > 128 || typeof p.iat !== "number" ||
         typeof p.exp !== "number" || p.exp - p.iat > 300 || p.iat > now + 30 || p.environment !== config.environment) throw new AgentError("invalid_grant");
     return { account: p.sub, id: p.jti };
+  }
+
+  /** The person an accepted issuer vouches for, or null when the token is not from one (your own assertions go on to `ownAssertion`). */
+  async function issuerPerson(raw: unknown): Promise<{ issuer: string; subject: string; email: string } | null> {
+    if (!issuers.size || typeof raw !== "string" || raw.length > MAX_BODY_BYTES) return null;
+    let iss: unknown;
+    try { iss = decodeJwt(raw).iss; } catch { return null; }
+    const keys = typeof iss === "string" ? issuers.get(iss) : undefined;
+    if (typeof iss !== "string" || !keys) return null;
+    const { payload: p } = await jwtVerify(raw, keys, { issuer: iss, audience: issuer, algorithms: ["ES256", "RS256"], requiredClaims: ["sub", "exp", "iat"] });
+    // An environment claim, when the issuer sends one (Rose ID does), must be this one.
+    if (typeof p.sub !== "string" || !p.sub || typeof p.email !== "string" || !EMAIL.test(p.email) || p.email_verified !== true ||
+        (p.environment !== undefined && p.environment !== config.environment)) throw new AgentError("invalid_grant");
+    return { issuer: iss, subject: p.sub, email: p.email };
+  }
+
+  /** One trial account per person, found again by issuer and subject; shortcut: a lost creation race leaves an unused account at your product. */
+  async function issuerTrial(person: { issuer: string; subject: string; email: string }): Promise<Response> {
+    const owner = `${config.environment}:issuer:${await sha256(`${person.issuer}\n${person.subject}`)}`;
+    let account = ((await store.read(buyerKey(owner))) as BuyerRecord | undefined)?.account;
+    if (!account) {
+      let created: string;
+      try {
+        created = await accounts.create("service_auth", person);
+      } catch {
+        throw new AgentError("temporarily_unavailable", 503);
+      }
+      if (!ACCOUNT_ID.test(created)) throw new Error("AgentAccounts.create returned an invalid account id");
+      account = (await apply({ type: "issuer_trial", owner, account: created, expires: Date.now() + ISSUER_TRIAL_SECONDS * 1000, maxUses: config.trialLimit })).account as string;
+    }
+    const apiKey = await keyFor(account, "trial");
+    return token(account, apiKey, "trial", (await record(account))?.trial?.expires ?? 0);
   }
 
   /** The agent's key; a failure at your product is worth a retry, and spends no grant. */
@@ -380,7 +438,8 @@ export function createAgentHandler(config: AgentConfig) {
           scopes_supported: [...list(own.scopes_supported), scope("trial"), scope("full")],
           agent_auth: { skill: `${issuer}/auth.md`, identity_endpoint: `${issuer}/agent/identity`, claim_endpoint: `${issuer}/agent/identity/claim`,
             events_endpoint: `${issuer}/agent/events`, events_supported: [REVOKED_EVENT], identity_types_supported: ["anonymous", "service_auth", "identity_assertion"],
-            identity_assertion: { assertion_types_supported: [ID_JAG] },
+            identity_assertion: { assertion_types_supported: [ID_JAG] }, trial_mode: mode,
+            ...(mode === "auth-provider" ? { accepted_issuers: [...issuers.keys()] } : {}),
             extensions: { ceremony_created_on_registration: true, claim_completion: `${issuer}/agent/identity/claim/complete`, api_key_delivery: true } } });
       }
       return failure("not_found", 404);
@@ -404,6 +463,8 @@ export function createAgentHandler(config: AgentConfig) {
     }
     if (path === "/oauth2/token") {
       if (data.grant_type === JWT_GRANT) {
+        const person = await issuerPerson(data.assertion);
+        if (person) return issuerTrial(person);
         const own = await ownAssertion(data.assertion);
         // The key before the assertion is spent, so a failure at your product leaves it usable.
         const grant = (await record(own.account))?.agent?.status === "claimed" ? "full" : "trial";
