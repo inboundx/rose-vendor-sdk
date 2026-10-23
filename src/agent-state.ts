@@ -316,9 +316,10 @@ export function applyAgentChange(change: AgentChange, records: Record<string, Js
 
     case "set_key": {
       const record = load<AccountRecord>(accountKey(change.account));
-      if (record?.key) return done({ key: record.key as unknown as Json, kept: true });
-      // A key issued for the trial must not become the claimed account's key, nor the reverse.
+      // A key issued for the trial must not become the claimed account's key, nor the reverse; the stored key
+      // is returned only when its scope is still the one asked for.
       if (!record || keyGrant(record, now)?.scope !== change.scope) return fail("restricted");
+      if (record.key) return done({ key: record.key as unknown as Json, kept: true });
       record.key = change.key;
       save(accountKey(change.account), record);
       return done({ key: change.key as unknown as Json, kept: false });

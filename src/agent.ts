@@ -213,6 +213,7 @@ export function createAccountDirectory(store: AgentStore, accounts: Pick<AgentAc
       const mapped = outcome.account as string;
       // A buyer who tried the product through an accepted issuer keeps that account as their own.
       if ((await record(mapped))?.trial) await store.apply({ type: "trial_upgrade", owner: ownerOf(buyer), account: mapped });
+      await settle(mapped); // the retired trial key stops working before provisioning succeeds, on a retry too
       return { account: mapped };
     },
     async owns(buyer: Buyer, account: string): Promise<boolean> {

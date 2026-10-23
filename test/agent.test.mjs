@@ -692,3 +692,30 @@ test('auth-provider: a revoked trial is restricted at the signed door and is not
   assert.equal(await v.agent.contract.access(who, trial.account_id), 'restricted');
   assert.equal(v.accounts.keys.size, 0);
 });
+
+test('auth-provider: a trial exchange that loses a race to an upgrade is refused, never handed the full key', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId(), who = { buyerId: buyer, environment: 'test' };
+  v.accounts.beforeIssue = async () => {
+    v.accounts.beforeIssue = null; // the next issuance (the full key) runs straight through
+    const trialAccount = [...v.store.data.keys()].find((key) => key.startsWith('account:')).slice('account:'.length);
+    await v.agent.contract.provision(who, await v.accounts.create());
+    assert.ok((await v.agent.contract.access(who, trialAccount)).apiKey);
+  };
+  const raced = await exchange(v, await roseIdentity(buyer));
+  assert.equal(raced.status, 400);
+  assert.equal((await json(raced)).access_token, undefined);
+  assert.equal([...v.accounts.keys.values()].filter((key) => key.grant.scope === 'trial').length, 0);
+});
+
+test('auth-provider: provisioning stops the trial key at once, and a retry finishes a failed stop', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId(), who = { buyerId: buyer, environment: 'test' };
+  const trial = await json(await exchange(v, await roseIdentity(buyer)));
+  v.accounts.failRevoke = true;
+  await assert.rejects(v.agent.contract.provision(who, await v.accounts.create()));
+  assert.equal(v.accounts.call(trial.access_token), 200); // not stopped yet, and provisioning did not report success
+  v.accounts.failRevoke = false;
+  assert.deepEqual(await v.agent.contract.provision(who, await v.accounts.create()), { account: trial.account_id });
+  assert.equal(v.accounts.call(trial.access_token), 401);
+});
