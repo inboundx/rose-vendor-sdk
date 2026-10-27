@@ -41,6 +41,7 @@ export interface AccountRecord {
   key?: AgentKey;
   staleKeys?: string[]; // keys to revoke at your product
   claimedBy?: string; // email of the claim to record at your product; no key until then
+  trial?: { expires: number; maxUses: number; revoked?: boolean }; // started by a trusted issuer: a trial key until `expires`, until a signed provision upgrades it
 }
 
 /** `buyer:<environment>:<buyer id>`: the buyer's one account, used proofs and revocation cutoff. */
@@ -63,6 +64,8 @@ export type AgentChange =
   | { type: "revoke_owner"; owner: string; account: string | null; eventId: string; eventExpires: number; issuedAt: number }
   | { type: "revocation_done"; owner: string; eventId: string; eventExpires: number }
   | { type: "provision"; owner: string; account: string }
+  | { type: "issuer_trial"; owner: string; account: string; expires: number; maxUses: number; issuedAt: number }
+  | { type: "trial_upgrade"; owner: string; account: string }
   | { type: "set_key"; account: string; key: AgentKey; scope: "trial" | "full" }
   | { type: "claim_recorded"; account: string; email: string }
   | { type: "key_revoked"; account: string; keyId: string };
@@ -81,6 +84,7 @@ export function agentChangeKeys(change: AgentChange): string[] {
     case "claim":
       return [accountKey(change.account), buyerKey(change.owner)];
     case "provision":
+    case "issuer_trial":
       return [accountKey(change.account), buyerKey(change.owner)];
     case "revoke_owner":
       return change.account ? [buyerKey(change.owner), accountKey(change.account)] : [buyerKey(change.owner)];
@@ -95,7 +99,10 @@ export function agentChangeKeys(change: AgentChange): string[] {
 export function keyGrant(record: AccountRecord | undefined, now: number): { scope: "trial" | "full"; expiresAt?: number; maxUses?: number } | null {
   if ((!record?.owner && !record?.agent) || record.claimedBy) return null;
   const agent = record.agent;
-  if (!agent) return { scope: "full" };
+  if (!agent) {
+    if (!record.trial) return { scope: "full" };
+    return record.trial.expires > now ? { scope: "trial", expiresAt: record.trial.expires, maxUses: record.trial.maxUses } : null;
+  }
   if (agent.status === "claimed") return agent.credentialExpires > now ? { scope: "full", expiresAt: agent.credentialExpires } : null;
   if (agent.status === "pending" && agent.kind === "anonymous" && agent.expires > now) {
     return { scope: "trial", expiresAt: agent.expires, maxUses: agent.trialLimit };
@@ -118,6 +125,12 @@ function fresh(seen: Record<string, number>, now: number): Record<string, number
 function retireKey(record: AccountRecord): void {
   if (record.key) record.staleKeys = [...(record.staleKeys ?? []), record.key.id];
   delete record.key;
+}
+
+/** End an issuer trial for good: its key goes stale and no assertion can bring it back. */
+function endTrial(record: AccountRecord): void {
+  if (record.trial) Object.assign(record.trial, { expires: 0, revoked: true });
+  retireKey(record);
 }
 
 function revoke(record: AccountRecord, agent: AgentState, issuedAt: number): void {
@@ -229,8 +242,9 @@ export function applyAgentChange(change: AgentChange, records: Record<string, Js
 
     case "revoke_token": {
       const record = load<AccountRecord>(accountKey(change.account)), agent = record?.agent;
-      if (!record || !agent || !record.key || !equal(record.key.apiKey, change.apiKey)) return done({ revoked: false });
-      revoke(record, agent, Math.floor(now / 1000));
+      if (!record || !record.key || !equal(record.key.apiKey, change.apiKey) || (!agent && !record.trial)) return done({ revoked: false });
+      if (agent) revoke(record, agent, Math.floor(now / 1000));
+      else endTrial(record);
       save(accountKey(change.account), record);
       return done({ revoked: true });
     }
@@ -250,6 +264,9 @@ export function applyAgentChange(change: AgentChange, records: Record<string, Js
         } else {
           revoke(record, agent, change.issuedAt);
         }
+        save(accountKey(change.account as string), record);
+      } else if (record && !agent && record.trial && record.owner === change.owner) {
+        endTrial(record);
         save(accountKey(change.account as string), record);
       }
       return done();
@@ -274,11 +291,35 @@ export function applyAgentChange(change: AgentChange, records: Record<string, Js
       return done({ account: change.account, created: true });
     }
 
+    case "issuer_trial": {
+      // One trial per person: a later request finds the same account, expired or not.
+      const buyer = load<BuyerRecord>(buyerKey(change.owner)) ?? { seen: {}, revocations: {} };
+      if (buyer.account) return done({ account: buyer.account, created: false });
+      // A token issued before an acknowledged revocation cannot start a trial.
+      if (buyer.revokedAt !== undefined && change.issuedAt <= buyer.revokedAt) return fail("fresh_authentication_required");
+      if (records[accountKey(change.account)] !== undefined) return fail("account_conflict");
+      buyer.account = change.account;
+      save(accountKey(change.account), { owner: change.owner, trial: { expires: change.expires, maxUses: change.maxUses } });
+      save(buyerKey(change.owner), buyer);
+      return done({ account: change.account, created: true });
+    }
+
+    case "trial_upgrade": {
+      // The signed contract provisions the buyer's account: a trial that was not revoked becomes that account.
+      const record = load<AccountRecord>(accountKey(change.account));
+      if (!record || record.owner !== change.owner || record.agent || !record.trial || record.trial.revoked) return done({ upgraded: false });
+      delete record.trial;
+      retireKey(record); // the trial's key stops working; the account's full key comes with its checkout
+      save(accountKey(change.account), record);
+      return done({ upgraded: true });
+    }
+
     case "set_key": {
       const record = load<AccountRecord>(accountKey(change.account));
-      if (record?.key) return done({ key: record.key as unknown as Json, kept: true });
-      // A key issued for the trial must not become the claimed account's key, nor the reverse.
+      // A key issued for the trial must not become the claimed account's key, nor the reverse; the stored key
+      // is returned only when its scope is still the one asked for.
       if (!record || keyGrant(record, now)?.scope !== change.scope) return fail("restricted");
+      if (record.key) return done({ key: record.key as unknown as Json, kept: true });
       record.key = change.key;
       save(accountKey(change.account), record);
       return done({ key: change.key as unknown as Json, kept: false });

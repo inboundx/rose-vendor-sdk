@@ -520,3 +520,202 @@ test('proof replay shards prune expiry and never evict live proofs when full', (
   const full = Object.fromEntries(Array.from({length:1024}, (_,i)=>['ab'+(i+1).toString(16).padStart(62,'0'),now+300000]));
   assert.equal(applyAgentChange(change,{[key]:full},now).outcome.error,'proof_capacity_reached');
 });
+
+const idp = await generateKeyPair('ES256');
+const idpJwk = { ...await exportJWK(idp.publicKey), kid: 'idp' };
+const IDP = 'https://idp.example';
+const authProvider = (overrides = {}) => setup({ mode: 'auth-provider', acceptedIssuers: [{ issuer: IDP, jwks: { keys: [idpJwk] } }], ...overrides });
+
+async function identity(claims = {}, key = idp.privateKey) {
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({ iss: IDP, sub: 'user_1', aud: ORIGIN, iat: now, exp: now + 300, email: 'person@example.com', email_verified: true, ...claims })
+    .setProtectedHeader({ alg: 'ES256', kid: 'idp' }).sign(key);
+}
+
+test('mode is checked at startup; catalogue is not available yet', async () => {
+  await assert.rejects(setup({ mode: 'catalogue' }), /not available yet/);
+  await assert.rejects(setup({ mode: 'auth-provider' }), /acceptedIssuers/);
+  await assert.rejects(setup({ acceptedIssuers: [{ issuer: IDP, jwks: { keys: [idpJwk] } }] }), /acceptedIssuers/);
+  await assert.rejects(setup({ mode: 'sandbox' }), /Invalid mode/);
+  await assert.rejects(authProvider({ acceptedIssuers: [{ issuer: IDP, jwks: { keys: [{ ...idpJwk, d: 'secret' }] } }] }), /public keys/);
+});
+
+test('the mode is published in the OAuth metadata, contract by default', async () => {
+  const metadata = async (v) => (await v.agent.handle(new Request(`${ORIGIN}/.well-known/oauth-authorization-server`))).json();
+  assert.equal((await metadata(await setup())).agent_auth.trial_mode, 'contract');
+  const published = (await metadata(await authProvider())).agent_auth;
+  assert.equal(published.trial_mode, 'auth-provider');
+  assert.deepEqual(published.accepted_issuers, [IDP]);
+});
+
+test('auth-provider: a trusted issuer\'s token is exchanged for one limited trial key per person', async () => {
+  const v = await authProvider();
+  const first = await json(await exchange(v, await identity()));
+  assert.equal(first.scope, 'thing:trial');
+  assert.equal(first.account_id, 'acct_1');
+  assert.ok(first.expires_in > 3500 && first.expires_in <= 3600);
+  assert.equal(v.accounts.keys.get(first.access_token).grant.maxUses, 2);
+  assert.equal(v.accounts.call(first.access_token), 200);
+  assert.equal(v.accounts.call(first.access_token), 200);
+  assert.equal(v.accounts.call(first.access_token), 403);
+  // The same person gets the same account and key; another person gets another account.
+  const again = await json(await exchange(v, await identity()));
+  assert.deepEqual([again.account_id, again.access_token], [first.account_id, first.access_token]);
+  assert.notEqual((await json(await exchange(v, await identity({ sub: 'user_2' })))).account_id, first.account_id);
+});
+
+test('auth-provider: the trial ends for good when it expires', async () => {
+  const v = await authProvider();
+  const first = await json(await exchange(v, await identity()));
+  const record = v.store.data.get(`account:${first.account_id}`);
+  record.trial.expires = Date.now() - 1;
+  const refused = await exchange(v, await identity());
+  assert.equal(refused.status, 400);
+  assert.equal((await json(refused)).error, 'invalid_grant');
+  assert.equal(v.accounts.keys.size, 1);
+});
+
+test('auth-provider: refuses tokens that are not verified, for this origin, from a trusted issuer', async () => {
+  const v = await authProvider();
+  const stranger = await generateKeyPair('ES256');
+  for (const token of [
+    await identity({ email_verified: false }),
+    await identity({ email_verified: undefined }),
+    await identity({ email: undefined }),
+    await identity({ aud: 'https://other.example' }),
+    await identity({ environment: 'production' }),
+    await identity({ exp: Math.floor(Date.now() / 1000) - 10 }),
+    await identity({}, stranger.privateKey),
+    await identity({ iss: 'https://evil.example' }),
+    'not-a-token',
+  ]) assert.equal((await exchange(v, token)).status, 400);
+  assert.equal(v.accounts.keys.size, 0);
+  assert.equal(v.store.data.size, 0);
+});
+
+test('auth-provider: a failing product answers 503 and the retry succeeds', async () => {
+  const v = await authProvider();
+  v.accounts.failIssue = true;
+  assert.equal((await exchange(v, await identity())).status, 503);
+  v.accounts.failIssue = false;
+  assert.equal((await exchange(v, await identity())).status, 200);
+});
+
+/** An identity token signed by Rose's broker, the way Rose's try_product sends it. */
+async function roseIdentity(buyer, claims = {}, typ = 'JWT') {
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({ iss: 'https://identity.example', sub: buyer, aud: ORIGIN, jti: crypto.randomUUID(), iat: now, exp: now + 300,
+    email: 'person@example.com', email_verified: true, environment: 'test', ...claims })
+    .setProtectedHeader({ typ, alg: 'ES256', kid: 'broker' }).sign(broker.privateKey);
+}
+const roseIssuer = { issuer: 'https://identity.example', jwks: { keys: [brokerJwk] } };
+
+test('auth-provider: the person can revoke their own trial key, and no token brings it back', async () => {
+  const v = await authProvider();
+  const first = await json(await exchange(v, await identity()));
+  assert.equal(v.accounts.call(first.access_token), 200);
+  assert.equal((await v.post('/oauth2/revoke', { token: first.access_token })).status, 200);
+  assert.equal(v.accounts.call(first.access_token), 401);
+  const again = await exchange(v, await identity());
+  assert.equal(again.status, 400);
+  assert.equal(v.accounts.keys.size, 0);
+});
+
+test('auth-provider: Rose\'s revocation event ends the trial of a Rose ID buyer', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId();
+  const first = await json(await exchange(v, await roseIdentity(buyer)));
+  assert.equal(v.accounts.call(first.access_token), 200);
+  const now = Math.floor(Date.now() / 1000);
+  const event = await proof({ registration_id: 'none', claim: { user_code: '000000' } }, buyer, { iat: now, exp: now + 300, events: { [REVOKED]: {} } }, 'secevent+jwt');
+  assert.equal((await v.post('/agent/events', event)).status, 202);
+  assert.equal(v.accounts.call(first.access_token), 401);
+  assert.equal((await exchange(v, await roseIdentity(buyer))).status, 400);
+});
+
+test('auth-provider: Rose\'s claim proofs and non-buyer subjects are not identity tokens', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  assert.equal((await exchange(v, await roseIdentity(buyerId(), {}, 'oauth-id-jag+jwt'))).status, 400);
+  assert.equal((await exchange(v, await roseIdentity(buyerId(), {}, 'secevent+jwt'))).status, 400);
+  assert.equal((await exchange(v, await roseIdentity('not-a-buyer'))).status, 400);
+  assert.equal(v.accounts.keys.size, 0);
+});
+
+test('auth-provider: an account that is not a trial is not handed a trial key', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId();
+  const account = await v.accounts.create();
+  await v.agent.contract.provision({ buyerId: buyer, environment: 'test' }, account);
+  assert.equal((await exchange(v, await roseIdentity(buyer))).status, 400);
+  assert.equal(v.accounts.keys.size, 0);
+});
+
+test('acceptedIssuers cannot hold the vendor\'s own origin, whose assertions take the existing exchange', async () => {
+  await assert.rejects(authProvider({ acceptedIssuers: [{ issuer: ORIGIN, jwks: { keys: [idpJwk] } }] }), /own origin/);
+  await assert.rejects(authProvider({ acceptedIssuers: [{ issuer: `${ORIGIN}/`, jwks: { keys: [idpJwk] } }] }), /own origin/);
+});
+
+test('auth-provider: a revocation that arrives first blocks tokens issued before it', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId();
+  const now = Math.floor(Date.now() / 1000);
+  const stale = await roseIdentity(buyer, { iat: now - 5 });
+  const event = await proof({ registration_id: 'none', claim: { user_code: '000000' } }, buyer, { iat: now, exp: now + 300, events: { [REVOKED]: {} } }, 'secevent+jwt');
+  assert.equal((await v.post('/agent/events', event)).status, 202);
+  const refused = await exchange(v, stale);
+  assert.equal(refused.status, 400);
+  assert.equal(v.accounts.keys.size, 0);
+  assert.equal(v.store.data.get(`buyer:test:${buyer}`)?.account, undefined);
+});
+
+test('auth-provider: a buyer who tried the product provisions that same account, and the trial key ends', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId(), who = { buyerId: buyer, environment: 'test' };
+  const trial = await json(await exchange(v, await roseIdentity(buyer)));
+  assert.equal(await v.agent.contract.access(who, trial.account_id), 'restricted'); // a trial is not the account's full access yet
+  const provisioned = await v.agent.contract.provision(who, await v.accounts.create());
+  assert.deepEqual(provisioned, { account: trial.account_id });
+  const full = await v.agent.contract.access(who, trial.account_id);
+  assert.ok(full.apiKey && full.apiKey !== trial.access_token);
+  assert.equal(v.accounts.call(trial.access_token), 401);
+  assert.equal(v.accounts.call(full.apiKey), 200);
+  assert.equal((await exchange(v, await roseIdentity(buyer))).status, 400); // no second trial on a real account
+});
+
+test('auth-provider: a revoked trial is restricted at the signed door and is not upgraded by provisioning', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId(), who = { buyerId: buyer, environment: 'test' };
+  const trial = await json(await exchange(v, await roseIdentity(buyer)));
+  assert.equal((await v.post('/oauth2/revoke', { token: trial.access_token })).status, 200);
+  assert.equal(await v.agent.contract.check(who, trial.account_id), 'restricted');
+  await v.agent.contract.provision(who, await v.accounts.create());
+  assert.equal(await v.agent.contract.access(who, trial.account_id), 'restricted');
+  assert.equal(v.accounts.keys.size, 0);
+});
+
+test('auth-provider: a trial exchange that loses a race to an upgrade is refused, never handed the full key', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId(), who = { buyerId: buyer, environment: 'test' };
+  v.accounts.beforeIssue = async () => {
+    v.accounts.beforeIssue = null; // the next issuance (the full key) runs straight through
+    const trialAccount = [...v.store.data.keys()].find((key) => key.startsWith('account:')).slice('account:'.length);
+    await v.agent.contract.provision(who, await v.accounts.create());
+    assert.ok((await v.agent.contract.access(who, trialAccount)).apiKey);
+  };
+  const raced = await exchange(v, await roseIdentity(buyer));
+  assert.equal(raced.status, 400);
+  assert.equal((await json(raced)).access_token, undefined);
+  assert.equal([...v.accounts.keys.values()].filter((key) => key.grant.scope === 'trial').length, 0);
+});
+
+test('auth-provider: provisioning stops the trial key at once, and a retry finishes a failed stop', async () => {
+  const v = await setup({ mode: 'auth-provider', acceptedIssuers: [roseIssuer] });
+  const buyer = buyerId(), who = { buyerId: buyer, environment: 'test' };
+  const trial = await json(await exchange(v, await roseIdentity(buyer)));
+  v.accounts.failRevoke = true;
+  await assert.rejects(v.agent.contract.provision(who, await v.accounts.create()));
+  assert.equal(v.accounts.call(trial.access_token), 200); // not stopped yet, and provisioning did not report success
+  v.accounts.failRevoke = false;
+  assert.deepEqual(await v.agent.contract.provision(who, await v.accounts.create()), { account: trial.account_id });
+  assert.equal(v.accounts.call(trial.access_token), 401);
+});

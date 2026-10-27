@@ -78,7 +78,7 @@ Use Node.js 22 or later with ESM, or a Web Crypto-capable server runtime. Instal
 tag in your server project; npm builds it on install:
 
 ```bash
-npm install github:inboundx/rose-vendor-sdk#v0.4.0
+npm install github:inboundx/rose-vendor-sdk#v0.5.0
 ```
 
 The package includes compiled JavaScript, TypeScript declarations and an integration
@@ -92,7 +92,7 @@ repository, and replace the bracketed parts:
 ```text
 Connect this product to Rose for Agents with the Rose vendor SDK.
 
-1. Install it in the server project: npm install github:inboundx/rose-vendor-sdk#v0.4.0
+1. Install it in the server project: npm install github:inboundx/rose-vendor-sdk#v0.5.0
    Then read node_modules/@userose/vendor-sdk/README.md in full. It is the contract; follow
    it over your own assumptions.
 2. Find how this server routes HTTP requests, how it stores accounts, and how it runs the
@@ -301,6 +301,26 @@ a bare `401` concludes that only a person can sign up; the challenge
 (`WWW-Authenticate: Bearer resource_metadata=…`, RFC 9728) is where auth.md discovery starts,
 and a JSON body also gains a one-line pointer to `/auth.md`. Link `/auth.md` from your API docs
 and `llms.txt` as well: in Rose's tests, that link is what agents followed.
+
+#### How Rose trials your product (`mode`)
+
+`mode` says how a buyer's agent starts a trial. The SDK publishes it in your OAuth metadata
+(`agent_auth.trial_mode`) and Rose reads it from there.
+
+- **`contract`** (default): the signed `/trial` and the anonymous trial, as above.
+- **`auth-provider`**: set `acceptedIssuers` to the identity providers you trust, each with its
+  issuer and public keys (`{ issuer, jwks }`; update the keys when the provider rotates them). Rose
+  ID is one. An agent posts its identity token to `/oauth2/token` with
+  `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer` and gets a trial key for its account.
+  The token needs a verified email and your origin as audience. One person (issuer and subject)
+  gets one account and one trial, for an hour and `trialLimit` calls: `issueKey` receives both
+  limits, enforce them. `create` receives the person, to record with the account. The person can
+  revoke the key at `/oauth2/revoke`, and Rose's revocation events end the trial of a Rose ID
+  buyer; either way the trial does not come back. A Rose ID buyer who then signs up through the
+  signed `/r4a` contract keeps the trial's account as their own (`contract.provision` upgrades
+  it and retires the trial key). The SDK refuses to start when `auth-provider`
+  has no `acceptedIssuers`, or the reverse, or when an accepted issuer is your own origin.
+- **`catalogue`**: Rose runs the trial with its own key. Not available yet; the SDK refuses it.
 
 #### When your product is an MCP server
 
